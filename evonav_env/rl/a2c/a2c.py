@@ -34,10 +34,19 @@ class A2C:
     def update(self, rollouts):
         advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
 
+        # Must match Policy/SRNN ``nminibatch`` (nenv // nminibatch at train time).
+        base = getattr(self.actor_critic, "base", None)
+        num_mini_batch = int(getattr(base, "nminibatch", 1) or 1)
+        num_mini_batch = max(1, num_mini_batch)
+
         if self.actor_critic.is_recurrent:
-            data_generator = rollouts.recurrent_generator(advantages, num_mini_batch=1)
+            data_generator = rollouts.recurrent_generator(
+                advantages, num_mini_batch=num_mini_batch
+            )
         else:
-            data_generator = rollouts.feed_forward_generator(advantages, num_mini_batch=1)
+            data_generator = rollouts.feed_forward_generator(
+                advantages, num_mini_batch=num_mini_batch
+            )
 
         value_loss_epoch = 0.0
         action_loss_epoch = 0.0

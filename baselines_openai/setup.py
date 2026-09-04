@@ -49,13 +49,20 @@ setup(name='baselines',
 
 
 # ensure there is some tensorflow build with version above 1.4
-import pkg_resources
-tf_pkg = None
+# (importlib.metadata avoids pkg_resources, which is missing in modern
+# isolated pip build envs / setuptools without setuptools' legacy extras)
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+except ImportError:  # pragma: no cover
+    from importlib_metadata import PackageNotFoundError, version as _pkg_version
+
+tf_pkg_version = None
 for tf_pkg_name in ['tensorflow', 'tensorflow-gpu', 'tf-nightly', 'tf-nightly-gpu']:
     try:
-        tf_pkg = pkg_resources.get_distribution(tf_pkg_name)
-    except pkg_resources.DistributionNotFound:
+        tf_pkg_version = _pkg_version(tf_pkg_name)
+        break
+    except PackageNotFoundError:
         pass
-assert tf_pkg is not None, 'TensorFlow needed, of version above 1.4'
+assert tf_pkg_version is not None, 'TensorFlow needed, of version above 1.4'
 from distutils.version import LooseVersion
-assert LooseVersion(re.sub(r'-?rc\d+$', '', tf_pkg.version)) >= LooseVersion('1.4.0')
+assert LooseVersion(re.sub(r'-?rc\d+$', '', tf_pkg_version)) >= LooseVersion('1.4.0')

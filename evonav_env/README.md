@@ -35,7 +35,7 @@ py -3.10 -m venv .venv
 3. Install the **vendored** OpenAI Baselines slice at repo root
    (trimmed — vec_env / logger / bench only; see `../baselines_openai/README.md`):
 ```
-pip install -e ../baselines_openai
+pip install -e ../baselines_openai --no-build-isolation
 ```
 
 4. Install [Python-RVO2](https://github.com/sybrenstuvel/Python-RVO2) in the same environment

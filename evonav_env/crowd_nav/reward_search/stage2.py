@@ -190,11 +190,14 @@ def _stage2_train_argv(
         config.output_root, f"r{round_index:02d}_{candidate_id}"
     )
     nproc = resolve_num_processes(config.num_processes)
-    nbatch = (
-        max(1, int(config.num_mini_batch))
-        if config.num_mini_batch is not None
-        else default_num_mini_batch(nproc)
-    )
+    # A2C.update() always feeds a single mini-batch; SRNN uses
+    # nenv // num_mini_batch, so these must match (same as train.py).
+    if str(config.algo).lower() == "a2c":
+        nbatch = 1
+    elif config.num_mini_batch is not None:
+        nbatch = max(1, int(config.num_mini_batch))
+    else:
+        nbatch = default_num_mini_batch(nproc)
     if nbatch > nproc:
         nbatch = nproc
     argv = [
@@ -540,6 +543,11 @@ def evaluate_proxy_policy(
     """
     from crowd_sim.envs.utils.info import Collision, Danger, ReachGoal, Timeout
     from rl.networks.envs import make_vec_envs
+
+    # Eval always uses a single env; Policy was trained with N processes.
+    # Match test.py: overwrite nenv so infer-time reshapeT matches obs batch.
+    if hasattr(actor_critic, "base") and hasattr(actor_critic.base, "nenv"):
+        actor_critic.base.nenv = 1
 
     envs = make_vec_envs(
         algo_args.env_name,

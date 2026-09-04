@@ -23,7 +23,7 @@ cd evonav_env
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 pip install -r requirements_pinned.txt
-pip install -e ../baselines_openai
+pip install -e ../baselines_openai --no-build-isolation
 # Install PyTorch (pinned) and Python-RVO2 per evonav_env/README.md
 
 # Fast wiring test (~seconds)

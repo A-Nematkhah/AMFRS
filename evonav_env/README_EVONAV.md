@@ -11,7 +11,7 @@ cd evonav_env
 py -3.10 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements_pinned.txt
 .venv\Scripts\python.exe -m pip install git+https://github.com/sybrenstuvel/Python-RVO2.git
-.venv\Scripts\python.exe -m pip install -e ../baselines_openai
+.venv\Scripts\python.exe -m pip install -e ../baselines_openai --no-build-isolation
 ```
 
 Use this single `.venv` for the project. Do not mix it with system Python or

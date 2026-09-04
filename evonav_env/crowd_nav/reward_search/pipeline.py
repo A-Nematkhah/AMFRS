@@ -72,6 +72,8 @@ class EvoNavRunConfig:
     stage3_run_h_sweep: bool = True
 
     device: str = "cuda"
+    # None → auto (min(16, cpu-1)); set low on 4GB GPUs to avoid OOM.
+    num_processes: Optional[int] = None
     # AUDIT.md §8.1 — first validation pass defaults to without_random.
     randomization_regime: str = "without_random"
     # AUDIT.md §8.2 choice (a): Stage II/III use GST-inferred obs.
@@ -308,6 +310,7 @@ class EvoNavPipeline:
             horizon_steps=cfg.stage2_horizon,
             seed=cfg.seed,
             device=cfg.device,
+            num_processes=cfg.num_processes,
             output_root=os.path.join(cfg.output_dir, "stage2_train"),
             randomization_regime=regime,
             predict_method=predict_method,
@@ -361,6 +364,7 @@ class EvoNavPipeline:
             eval_episodes=cfg.stage3_eval_episodes,
             seed=cfg.seed,
             device=cfg.device,
+            num_processes=cfg.num_processes,
             output_root=os.path.join(cfg.output_dir, "stage3_train"),
             human_counts=(5, 10, 15, 20) if cfg.stage3_run_h_sweep else (20,),
             randomization_regime=regime,

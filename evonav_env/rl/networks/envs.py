@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 def make_env(env_id, seed, rank, log_dir, allow_early_resets, config=None, envNum=1, ax=None, test_case=-1,
              reward_fn=None):
     def _thunk():
+        # Windows spawn workers do not inherit gym registrations from the parent.
+        import crowd_sim  # noqa: F401
+
         env = gym.make(env_id)
 
         is_atari = hasattr(gym.envs, 'atari') and isinstance(

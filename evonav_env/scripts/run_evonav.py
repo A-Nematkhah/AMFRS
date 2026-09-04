@@ -87,6 +87,12 @@ def main() -> int:
     )
     parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
     parser.add_argument(
+        "--num-processes",
+        type=int,
+        default=None,
+        help="Parallel envs for Stage II/III (default: auto). Use 2-4 on 4GB GPUs.",
+    )
+    parser.add_argument(
         "--regime",
         type=str,
         default="without_random",
@@ -174,6 +180,7 @@ def main() -> int:
         stage3_use_stub=args.stage3_stub or args.fast,
         stage3_run_h_sweep=not args.no_h_sweep,
         device=args.device,
+        num_processes=args.num_processes,
         randomization_regime=args.regime,
         predict_method="none" if args.fast else "inferred",
     )

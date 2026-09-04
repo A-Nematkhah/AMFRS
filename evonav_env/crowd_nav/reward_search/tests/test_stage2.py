@@ -168,3 +168,12 @@ def test_stage2_argv_resolves_auto_num_processes():
     cfg1 = Stage2Config(num_processes=1)
     argv1 = _stage2_train_argv(cfg1, "c0", 0)
     assert int(argv1[argv1.index("--num-processes") + 1]) == 1
+
+
+def test_stage2_a2c_forces_num_mini_batch_one():
+    """A2C/SRNN require matching mini-batch size (train.py sets this to 1)."""
+    from crowd_nav.reward_search.stage2 import _stage2_train_argv
+
+    cfg = Stage2Config(algo="a2c", num_processes=4, num_mini_batch=None)
+    argv = _stage2_train_argv(cfg, "c0", 0)
+    assert int(argv[argv.index("--num-mini-batch") + 1]) == 1
