@@ -71,6 +71,7 @@ class Stage2Config:
     # Choice (a): GST-inferred obs parity with CrowdNav++ (AUDIT.md §8.2).
     env_name: str = "CrowdSimPredRealGST-v0"
     predict_method: str = "inferred"
+    human_num: int = 20
     randomization_regime: str = "without_random"
     output_root: str = "trained_models/stage2"
     device: str = "cpu"
@@ -259,9 +260,12 @@ def _make_proxy_env_config(config: Stage2Config):
     """
     Stage II env Config: short horizon + regime randomization + GST (choice a).
 
-    Note: ``Config`` fields are class attributes in this repo; callers should
-    treat this as process-local Stage-II setup.
+    ``Config.env`` is a shared class-level object. We shallow-copy it onto the
+    instance before mutating ``time_limit`` so Stage III still sees the paper
+    default (50s) in the same process.
     """
+    from copy import copy
+
     from crowd_nav.configs.config import Config
     from crowd_nav.reward_search.regime import (
         apply_regime_to_config,
@@ -286,8 +290,11 @@ def _make_proxy_env_config(config: Stage2Config):
         )
         config.env_name = expected
     cfg.robot.policy = "selfAttn_merge_srnn"
+    cfg.env = copy(cfg.env)
     cfg.env.time_limit = float(config.horizon_steps) * float(cfg.env.time_step)
     cfg.env.test_size = int(config.eval_episodes)
+    cfg.sim.human_num = max(1, int(config.human_num))
+    cfg.sim.human_num_range = 0
     return cfg
 
 
@@ -699,9 +706,10 @@ class Stage2Runner:
             f"- state.collision, state.reaching_goal, state.timeout\n"
             f"- state.action, state.time_step, state.global_time, state.time_limit\n"
             f"- NO state.history, NO state.prev_state, NO state.obstacle_dist, NO state.obstacle_distance, NO state.safety_dist\n"
-            f"- Use ** 0.5 for square root (no math module)\n"
+            f"- Optional `import math` is allowed; or use ** 0.5 for square root\n"
             f"- Signature must be: def compute_reward(state, memory): "
             f"(memory is a plain dict cleared each episode)\n"
+            f"- Always return a finite float (never None)\n"
             f"- No classes, getattr, hasattr, eval, exec, type, or dynamic field access\n\n"
             f"Return only the corrected function in a Python code block."
         )

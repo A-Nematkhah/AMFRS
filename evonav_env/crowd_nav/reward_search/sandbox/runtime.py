@@ -12,6 +12,7 @@ Episode memory contract (option a — function-only stateful rewards):
 
 from __future__ import annotations
 
+import ast
 import math
 import threading
 from typing import Any, Callable, Dict, Optional, Sequence
@@ -74,12 +75,21 @@ def compile_compute_reward(code: str, config: SandboxConfig) -> ComputeFn:
     exec() the already-AST-checked source and return compute_reward.
 
     ``code`` must have passed parse/check_structure/check_interface first.
+    Allowed imports (e.g. ``import math``) are stripped before exec because
+    those modules are injected into the sandbox namespace — ``__import__`` is
+    not available in restricted builtins.
     """
     namespace = {"__builtins__": dict(_SAFE_BUILTINS)}
     if "math" in config.allowed_modules:
         namespace["math"] = math
     try:
-        exec(compile(code, "<reward_candidate>", "exec"), namespace, namespace)
+        tree = ast.parse(code, mode="exec")
+        tree.body = [
+            node
+            for node in tree.body
+            if not isinstance(node, (ast.Import, ast.ImportFrom))
+        ]
+        exec(compile(tree, "<reward_candidate>", "exec"), namespace, namespace)
     except RewardSandboxError:
         raise
     except Exception as exc:

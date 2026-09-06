@@ -64,12 +64,12 @@ def compute_reward(state, memory):
 ```
 - The framework clears ``memory`` once per episode start and passes it into every call.
 Math Functions:
-- Use ** 0.5 for square roots (no math module needed).
-- Example: dist = ((dx**2 + dy**2) ** 0.5) is correct; do NOT import math or use math.sqrt.
+- Use ** 0.5 for square roots, or optionally `import math` (math is the only allowed import).
+- Example: dist = ((dx**2 + dy**2) ** 0.5) or math.sqrt(dx*dx + dy*dy).
 Constraints (CRITICAL):
 - Hyperparameters: All tuning parameters (e.g., weights, constants) must be defined as local variables inside the function body. Do not add them as function arguments beyond (state, memory).
 - Signature: Define exactly one function: def {func_name}(state, memory): ... that returns a finite float.
-- Sandbox: No import/from, classes, while loops, or reflection builtins (getattr, hasattr, eval, type, ...). Access state fields only via dot notation (state.robot.px, state.dmin, state.humans, ...).
+- Sandbox: No forbidden imports (only `math` is allowed), no classes, while loops, or reflection builtins (getattr, hasattr, eval, type, ...). Access state fields only via dot notation (state.robot.px, state.dmin, state.humans, ...).
 - Output Format: Your response must contain only the Python function within a single code block. Do not include any explanatory text or print statements.
 {seed_block}
 {reflection_block}
@@ -155,6 +155,12 @@ D3_SYSTEM_PROMPT = (
     "state.humans is a tuple; iterate with 'for human in state.humans:' then access human.px, human.py, human.vx, human.vy, human.radius. "
     "state.dmin (float), state.discomfort_dist (float, TOP-LEVEL, not under robot), state.collision/reaching_goal/timeout (bool). "
     "NO state.history, NO state.obstacle_dist, NO state.safety_dist — these do not exist. "
+    "SANDBOX HARD RULES (instant reject if violated): "
+    "- Never use getattr, hasattr, setattr, eval, exec, type, print. "
+    "- Access fields only with dot notation (state.dmin, state.robot.px). "
+    "- Do not import anything except optionally `import math` (math is allowed). "
+    "- Prefer (x**2)**0.5 over math if unsure. "
+    "- Always return a finite float (never None). "
     "Requirements: "
     "- Keep the original function signature compute_reward(state, memory). "
     "- Maintain O(T) computational complexity. "

@@ -76,6 +76,27 @@ def main() -> int:
     )
     parser.add_argument("--fast", action="store_true", help="Stub trainers + smoke Score1")
     parser.add_argument(
+        "--easy",
+        action="store_true",
+        help=(
+            "Easier env for pipeline result-getting: predict_method=none, "
+            "5 humans, longer Stage II horizon. Not for paper claims."
+        ),
+    )
+    parser.add_argument(
+        "--human-num",
+        type=int,
+        default=None,
+        help="Crowd size for Stage II/III (default 20; --easy sets 5)",
+    )
+    parser.add_argument(
+        "--predict-method",
+        type=str,
+        default=None,
+        choices=["inferred", "none", "const_vel", "truth"],
+        help="Override sim.predict_method (default inferred; --easy/--fast use none)",
+    )
+    parser.add_argument(
         "--scale",
         type=str,
         default=None,
@@ -183,6 +204,7 @@ def main() -> int:
         num_processes=args.num_processes,
         randomization_regime=args.regime,
         predict_method="none" if args.fast else "inferred",
+        human_num=20,
     )
     if args.regime == "both":
         print(
@@ -195,13 +217,21 @@ def main() -> int:
         cfg.apply_fast_profile()
         cfg.output_dir = args.output_dir
         cfg.seed = args.seed
+    if args.easy and not args.fast:
+        cfg.apply_easy_profile()
+    if args.predict_method is not None and not args.fast:
+        cfg.predict_method = args.predict_method
+    if args.human_num is not None:
+        cfg.human_num = max(1, int(args.human_num))
 
     logging.info(
-        "EvoNav Algorithm 1 → %s (fast=%s, K3=%d, paper_K3=%d)",
+        "EvoNav Algorithm 1 → %s (fast=%s, easy=%s, humans=%d, predict=%s, K3=%d)",
         cfg.output_dir,
         cfg.fast,
+        bool(args.easy),
+        cfg.human_num,
+        cfg.predict_method,
         cfg.stage3_train_steps,
-        STAGE3_PAPER_STEPS,
     )
     artifacts = EvoNavPipeline(cfg).run()
     logging.info("Done. Final candidate: %s", artifacts.best_stage3.candidate_id)

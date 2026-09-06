@@ -584,6 +584,36 @@ class Stage3Runner:
         self.checkpoint_store = None  # type: ignore[assignment]
         self.checkpoint_seed: int = int(self.config.seed)
 
+    def _repair_invalid_code(
+        self,
+        candidate_id: str,
+        bad_code: str,
+        validation_error: str,
+        metrics: ProxyMetrics,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """One D.3 repair attempt (same contract as Stage II)."""
+        repair_prompt = (
+            f"The following reward function failed validation with this error:\n\n"
+            f"ERROR: {validation_error}\n\n"
+            f"ORIGINAL CODE:\n{bad_code}\n\n"
+            f"Please fix the code to pass validation. Remember:\n"
+            f"- state.robot.px/py/vx/vy/radius/gx/gy/v_pref; "
+            f"state.humans; state.dmin; state.discomfort_dist; "
+            f"state.collision/reaching_goal/timeout\n"
+            f"- Optional `import math` only; or use ** 0.5\n"
+            f"- Signature: def compute_reward(state, memory): "
+            f"and always return a finite float (never None)\n"
+            f"- No getattr/hasattr/eval/exec/type/classes\n\n"
+            f"Return only the corrected function in a Python code block."
+        )
+        full_prompt = f"{D3_SYSTEM_PROMPT}\n\n{repair_prompt}"
+        try:
+            raw = self.llm.complete(full_prompt)
+            repaired_code = normalize_to_compute_reward(extract_python_code(raw))
+            return repaired_code, None
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+
     def refine_candidate(
         self,
         candidate: RewardCandidate,
@@ -624,8 +654,42 @@ class Stage3Runner:
 
         reward_fn, err = self.validator.try_validate(new_code)
         if reward_fn is None:
+            logger.info(
+                "Sandbox rejected refinement for %s: %s — attempting repair",
+                candidate.candidate_id,
+                err,
+            )
+            repaired_code, repair_err = self._repair_invalid_code(
+                candidate.candidate_id, new_code, err or "unknown", metrics
+            )
+            if repaired_code is not None:
+                reward_fn, repair_validation_err = self.validator.try_validate(
+                    repaired_code
+                )
+                if reward_fn is not None:
+                    logger.info(
+                        "Repair succeeded for %s: validation passed",
+                        candidate.candidate_id,
+                    )
+                    new_code = repaired_code
+                    err = None
+                else:
+                    logger.warning(
+                        "Repair attempted but failed validation for %s: %s",
+                        candidate.candidate_id,
+                        repair_validation_err,
+                    )
+            else:
+                logger.warning(
+                    "Repair LLM call failed for %s: %s",
+                    candidate.candidate_id,
+                    repair_err,
+                )
+
+        if reward_fn is None:
             logger.warning(
-                "Sandbox rejected refinement for %s: %s — keeping previous code",
+                "Sandbox rejected refinement for %s (and repair failed): %s — "
+                "keeping previous code",
                 candidate.candidate_id,
                 err,
             )

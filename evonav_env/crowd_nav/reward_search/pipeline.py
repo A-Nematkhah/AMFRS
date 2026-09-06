@@ -78,6 +78,8 @@ class EvoNavRunConfig:
     randomization_regime: str = "without_random"
     # AUDIT.md §8.2 choice (a): Stage II/III use GST-inferred obs.
     predict_method: str = "inferred"
+    # Crowd size for Stage II/III train+eval (paper=20). Lower for easier debugging.
+    human_num: int = 20
     # Fast dry-run profile (tests / laptop)
     fast: bool = False
 
@@ -100,6 +102,19 @@ class EvoNavRunConfig:
         self.llm_provider = "seed"
         # Stubs never load GST; keep flags consistent for config builders.
         self.predict_method = "none"
+
+    def apply_easy_profile(self) -> None:
+        """
+        Easier simulator for pipeline result-getting (not paper claims).
+
+        - No GST prediction (faster, simpler obs)
+        - Fewer humans (5 vs 20)
+        - Longer Stage II horizon (~50s episodes)
+        """
+        self.predict_method = "none"
+        self.human_num = 5
+        self.stage2_horizon = 200  # 200 * 0.25s = 50s
+        self.stage3_run_h_sweep = False
 
 
 @dataclass
@@ -311,6 +326,7 @@ class EvoNavPipeline:
             seed=cfg.seed,
             device=cfg.device,
             num_processes=cfg.num_processes,
+            human_num=int(cfg.human_num),
             output_root=os.path.join(cfg.output_dir, "stage2_train"),
             randomization_regime=regime,
             predict_method=predict_method,
@@ -365,8 +381,11 @@ class EvoNavPipeline:
             seed=cfg.seed,
             device=cfg.device,
             num_processes=cfg.num_processes,
+            train_human_num=int(cfg.human_num),
             output_root=os.path.join(cfg.output_dir, "stage3_train"),
-            human_counts=(5, 10, 15, 20) if cfg.stage3_run_h_sweep else (20,),
+            human_counts=(5, 10, 15, 20)
+            if cfg.stage3_run_h_sweep
+            else (int(cfg.human_num),),
             randomization_regime=regime,
             predict_method=predict_method,
             env_name=env_name_for_predict_method(predict_method),
