@@ -14,6 +14,9 @@ REQUIRED_FUNCTION_NAME = "compute_reward"
 REQUIRED_ARG_NAME = "state"
 REQUIRED_MEMORY_ARG_NAME = "memory"
 
+# Keep math listed for namespace injection only. AST rejects import statements
+# when ``allow_imports`` is False (default) so nested ``import math`` cannot
+# reach smoke tests as ``ImportError: __import__ not found``.
 ALLOWED_MODULES: Tuple[str, ...] = ("math",)
 
 FORBIDDEN_NAME_IDS: Tuple[str, ...] = (
@@ -42,6 +45,7 @@ FORBIDDEN_NAME_IDS: Tuple[str, ...] = (
     "quit",
     "help",
     "print",
+    # Explicit (also covered by Name.startswith("__") in ast_policy):
     "__import__",
     "__builtins__",
     "__build_class__",

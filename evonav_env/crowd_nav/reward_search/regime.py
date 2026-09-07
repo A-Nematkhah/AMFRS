@@ -108,13 +108,13 @@ def assert_gst_matches_regime(
     """
     If ``predict_method == 'inferred'``, require GST ``_rand`` suffix ↔ regime.
 
-    If ``predict_method == 'none'``, log and return (non-predictive / collector).
+    If ``predict_method == 'none'``, log and return (non-predictive env; no GST).
     """
     method = (predict_method or "").strip().lower()
     if method == "none":
         logger.info(
             "[%s] predict_method=none — GST-regime consistency N/A "
-            "(non-predictive / Stage I collect path).",
+            "(non-predictive env for this call; GST checkpoint not loaded).",
             entry_point,
         )
         return
@@ -150,6 +150,27 @@ def assert_gst_matches_regime(
         )
 
 
+def detach_config_namespaces(cfg: Any) -> Any:
+    """
+    Shallow-copy class-level CrowdNav Config namespaces onto the instance.
+
+    ``Config.env`` / ``Config.sim`` / … are shared class attributes. Mutating
+    them in-place poisons other stages in-process, and on Windows ``spawn`` the
+    child re-imports ``config.py`` (defaults like ``human_num=20``) while the
+    parent may have sized ShmemVecEnv buffers from a mutated value (e.g. 5 for
+    ``--easy``). Detaching before mutation keeps pickle round-trips consistent.
+    """
+    from copy import copy
+
+    for name in ("env", "sim", "humans", "robot", "pred", "reward", "action_space"):
+        if name in getattr(cfg, "__dict__", {}):
+            continue
+        if not hasattr(cfg, name):
+            continue
+        setattr(cfg, name, copy(getattr(cfg, name)))
+    return cfg
+
+
 def apply_regime_to_config(
     cfg: Any,
     regime: str,
@@ -161,6 +182,7 @@ def apply_regime_to_config(
     Set randomization flags, predict_method / wrapper, and pred.model_dir on a
     CrowdNav ``Config`` instance (class-attr style). Assert GST when inferred.
     """
+    detach_config_namespaces(cfg)
     attrs, goal_changing = randomization_flags(regime)
     cfg.env.randomize_attributes = bool(attrs)
     cfg.humans.random_goal_changing = bool(goal_changing)

@@ -70,25 +70,37 @@ def require_finite_float(value: object) -> float:
     return number
 
 
+def _strip_import_nodes(tree: ast.AST) -> ast.AST:
+    """Remove every Import/ImportFrom anywhere in the tree (math is injected)."""
+
+    class _Strip(ast.NodeTransformer):
+        def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+            return None
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+            return None
+
+    cleaned = _Strip().visit(tree)
+    return ast.fix_missing_locations(cleaned)
+
+
 def compile_compute_reward(code: str, config: SandboxConfig) -> ComputeFn:
     """
     exec() the already-AST-checked source and return compute_reward.
 
     ``code`` must have passed parse/check_structure/check_interface first.
-    Allowed imports (e.g. ``import math``) are stripped before exec because
-    those modules are injected into the sandbox namespace — ``__import__`` is
-    not available in restricted builtins.
+    Import statements are stripped recursively before exec because allowed
+    modules (e.g. ``math``) are injected into the sandbox namespace —
+    ``__import__`` is not available in restricted builtins (nested
+    ``import math`` inside the function used to crash as a confusing
+    ``ImportError: __import__ not found`` during smoke tests).
     """
     namespace = {"__builtins__": dict(_SAFE_BUILTINS)}
     if "math" in config.allowed_modules:
         namespace["math"] = math
     try:
         tree = ast.parse(code, mode="exec")
-        tree.body = [
-            node
-            for node in tree.body
-            if not isinstance(node, (ast.Import, ast.ImportFrom))
-        ]
+        tree = _strip_import_nodes(tree)
         exec(compile(tree, "<reward_candidate>", "exec"), namespace, namespace)
     except RewardSandboxError:
         raise

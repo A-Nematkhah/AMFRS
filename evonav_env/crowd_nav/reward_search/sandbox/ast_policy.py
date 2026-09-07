@@ -19,16 +19,30 @@ class _PolicyVisitor(ast.NodeVisitor):
         self.reasons: List[str] = []
 
     def visit_Import(self, node: ast.Import) -> None:
-        for alias in node.names:
-            root = alias.name.split(".", 1)[0]
-            if root not in self.config.allowed_modules:
-                self.reasons.append(f"import is forbidden ({alias.name})")
+        if not self.config.allow_imports:
+            self.reasons.append(
+                "import is forbidden (math is pre-injected as name `math` - "
+                "do not import; prefer ** 0.5 for square roots; "
+                "never use __import__/getattr/hasattr)"
+            )
+        else:
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root not in self.config.allowed_modules:
+                    self.reasons.append(f"import is forbidden ({alias.name})")
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        root = (node.module or "").split(".", 1)[0]
-        if not root or root not in self.config.allowed_modules:
-            self.reasons.append(f"from-import is forbidden ({node.module or '*'})")
+        if not self.config.allow_imports:
+            self.reasons.append(
+                "from-import is forbidden (math is pre-injected as name `math` - "
+                "do not import; prefer ** 0.5 for square roots; "
+                "never use __import__/getattr/hasattr)"
+            )
+        else:
+            root = (node.module or "").split(".", 1)[0]
+            if not root or root not in self.config.allowed_modules:
+                self.reasons.append(f"from-import is forbidden ({node.module or '*'})")
         self.generic_visit(node)
 
     def visit_While(self, node: ast.While) -> None:

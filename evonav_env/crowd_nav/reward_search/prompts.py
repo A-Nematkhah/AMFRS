@@ -64,12 +64,13 @@ def compute_reward(state, memory):
 ```
 - The framework clears ``memory`` once per episode start and passes it into every call.
 Math Functions:
-- Use ** 0.5 for square roots, or optionally `import math` (math is the only allowed import).
-- Example: dist = ((dx**2 + dy**2) ** 0.5) or math.sqrt(dx*dx + dy*dy).
+- The math module is not importable (no `import math`, no `__import__`). Prefer `** 0.5` for square roots.
+- Example: dist = ((dx**2 + dy**2) ** 0.5). If you must use math helpers, call the pre-injected name `math.sqrt(...)` with NO import statement.
+- Do not use getattr, hasattr, or __import__.
 Constraints (CRITICAL):
 - Hyperparameters: All tuning parameters (e.g., weights, constants) must be defined as local variables inside the function body. Do not add them as function arguments beyond (state, memory).
 - Signature: Define exactly one function: def {func_name}(state, memory): ... that returns a finite float.
-- Sandbox: No forbidden imports (only `math` is allowed), no classes, while loops, or reflection builtins (getattr, hasattr, eval, type, ...). Access state fields only via dot notation (state.robot.px, state.dmin, state.humans, ...).
+- Sandbox: No import statements, no classes, while loops, or reflection builtins (getattr, hasattr, __import__, eval, type, ...). Access state fields only via dot notation (state.robot.px, state.dmin, state.humans, ...). Iterate humans with `for human in state.humans:` — do not index HumanObservable like a sequence (no human[0]).
 - Output Format: Your response must contain only the Python function within a single code block. Do not include any explanatory text or print statements.
 {seed_block}
 {reflection_block}
@@ -90,19 +91,20 @@ PROMPT_MEMORY_EXAMPLE = '''def compute_reward(state, memory):
 # ---------------------------------------------------------------------------
 
 _REWARD_STATE_ACCESS = """\
-RewardState access (dot notation only — never getattr/hasattr):
+RewardState access (dot notation only — never getattr/hasattr/__import__):
 - state.robot.px, state.robot.py, state.robot.vx, state.robot.vy, state.robot.radius, state.robot.gx, state.robot.gy, state.robot.v_pref
-- state.humans — loop with `for human in state.humans:` then human.px, human.py, human.vx, human.vy, human.radius
+- state.humans — loop with `for human in state.humans:` then human.px, human.py, human.vx, human.vy, human.radius (never human[0] / sequence indexing)
 - state.dmin, state.discomfort_dist, state.collision, state.reaching_goal, state.timeout
 - state.action, state.time_step, state.global_time, state.time_limit
 - memory: plain dict for episode-local state (e.g. memory['prev_dist']); cleared on episode reset
+- Math: math module is not importable; use ** 0.5 for square roots. Do not use getattr, hasattr, or __import__.
 """
 
 _D2_SANDBOX_RULES = """
 Sandbox rules (CRITICAL — invalid code is discarded):
 - Define exactly ONE top-level function `{func_name}(state, memory)` returning a finite float.
-- Do NOT use import/from, classes, while loops, print, lambda, or reflection builtins.
-- Forbidden names (instant rejection): getattr, hasattr, eval, exec, type, setattr, delattr, globals, locals, vars, open.
+- Do NOT use import/from (math is not importable — prefer ** 0.5), classes, while loops, print, lambda, or reflection builtins.
+- Forbidden names (instant rejection): getattr, hasattr, __import__, eval, exec, type, setattr, delattr, globals, locals, vars, open.
 - Access RewardState only via dot notation (see below). If a parent uses getattr/hasattr or dynamic field lookup, rewrite those lines to explicit attribute access before returning code.
 - Use ``memory`` (dict) for cross-timestep shaping; never invent state.history / state.prev_state.
 {reward_state_access}
@@ -156,10 +158,10 @@ D3_SYSTEM_PROMPT = (
     "state.dmin (float), state.discomfort_dist (float, TOP-LEVEL, not under robot), state.collision/reaching_goal/timeout (bool). "
     "NO state.history, NO state.obstacle_dist, NO state.safety_dist — these do not exist. "
     "SANDBOX HARD RULES (instant reject if violated): "
-    "- Never use getattr, hasattr, setattr, eval, exec, type, print. "
+    "- Never use getattr, hasattr, setattr, eval, exec, type, print, __import__. "
     "- Access fields only with dot notation (state.dmin, state.robot.px). "
-    "- Do not import anything except optionally `import math` (math is allowed). "
-    "- Prefer (x**2)**0.5 over math if unsure. "
+    "- math module is not importable; use ** 0.5 for square roots "
+    "(do not write import math or __import__). "
     "- Always return a finite float (never None). "
     "Requirements: "
     "- Keep the original function signature compute_reward(state, memory). "
@@ -188,6 +190,7 @@ Focus note: {feedback}
 {extra_context_if_any}
 Revise the function below.
 Maintain the original signature def compute_reward(state, memory): and return a meaningful per-frame shaping signal aggregated appropriately.
+Sandbox reminder: math is not importable (use ** 0.5); never getattr/hasattr/__import__; always return a finite float.
 Return **only** the updated function definition (no additional text).
 {current_code}
 """
@@ -280,13 +283,14 @@ Task Description:
 - Each function's goal is to output a scalar reward value based on the robot's current state, guiding it to its goal while avoiding collisions with dynamic human agents.
 Function Interface (same for every function):
 - Inputs:
-  - state: A RewardState snapshot for the current frame with fields:
-    - state.robot: px, py, vx, vy, radius, gx, gy, v_pref
-    - state.humans: tuple of nearby humans (px, py, vx, vy, radius) within sensor range
-    - state.dmin: closest human distance minus radii
-    - state.discomfort_dist, state.collision, state.reaching_goal, state.timeout
+  - state: A RewardState snapshot for the current frame with ONLY these fields:
+    - state.robot.px, state.robot.py, state.robot.vx, state.robot.vy, state.robot.radius, state.robot.gx, state.robot.gy, state.robot.v_pref
+    - state.humans: tuple of HumanObservable; iterate `for human in state.humans:` then human.px/py/vx/vy/radius (never index HumanObservable)
+    - state.dmin, state.discomfort_dist (TOP-LEVEL), state.collision, state.reaching_goal, state.timeout
     - state.action, state.time_step, state.global_time, state.time_limit
+    - NO state.history / state.prev_state
   - memory: plain mutable dict cleared each episode; use for progress shaping (no classes)
+- Math: math module is not importable; use ** 0.5 for square roots. Do not use getattr, hasattr, or __import__.
 - Output:
   - A single scalar (float) representing the reward for the current state or action.
 Design Principles:
@@ -296,7 +300,7 @@ Design Principles:
 Constraints (CRITICAL):
 - Hyperparameters must be local variables inside each function body (no extra arguments beyond state, memory).
 - Define exactly {n} top-level functions. Name them ``{func_name}_v1``, ``{func_name}_v2``, ... ``{func_name}_v{n}`` (each takes (state, memory) and returns a finite float).
-- Do **not** use import statements, classes, while loops, or reflection builtins (getattr, hasattr, eval, type, ...).
+- Do **not** use import statements (math is not importable — prefer ** 0.5), classes, while loops, or reflection builtins (getattr, hasattr, __import__, eval, type, ...).
 - Access RewardState only via dot notation (state.robot.px, state.dmin, state.humans, ...); use memory for cross-step state.
 - Output Format: return **only** Python code in a single fenced code block. No prose outside the block.
 {seed_block}
@@ -389,4 +393,39 @@ def format_d3_refinement(
         feedback=feedback.strip() or "(none)",
         extra_context_if_any=extra_context_if_any,
         current_code=current_code.rstrip(),
+    )
+
+
+def format_d3_repair(
+    *,
+    bad_code: str,
+    validation_error: str,
+) -> str:
+    """
+    Stage II/III sandbox-failure repair prompt.
+
+    Must stay aligned with AST policy: no import statements (math is
+    pre-injected), no getattr/hasattr/__import__, always return a finite float.
+    """
+    return (
+        "The following reward function failed validation with this error:\n\n"
+        f"ERROR: {validation_error}\n\n"
+        f"ORIGINAL CODE:\n{bad_code}\n\n"
+        "Please fix the code to pass validation. Remember:\n"
+        "- state.robot.px, state.robot.py, state.robot.vx, state.robot.vy, "
+        "state.robot.radius, state.robot.gx, state.robot.gy, state.robot.v_pref\n"
+        "- state.humans: iterate with `for human in state.humans:` then "
+        "human.px/py/vx/vy/radius (never index HumanObservable like human[0])\n"
+        "- state.dmin, state.discomfort_dist (TOP-LEVEL), "
+        "state.collision, state.reaching_goal, state.timeout\n"
+        "- NO state.history, NO state.prev_state, NO state.obstacle_dist\n"
+        "- math module is not importable: do NOT write `import math` or "
+        "`__import__`; use ** 0.5 for square roots "
+        "(or call pre-injected math.sqrt with no import)\n"
+        "- Signature must be: def compute_reward(state, memory): "
+        "(memory is a plain dict cleared each episode)\n"
+        "- Always return a finite float (never None)\n"
+        "- Forbidden: getattr, hasattr, __import__, eval, exec, type, classes, "
+        "import/from statements\n\n"
+        "Return only the corrected function in a Python code block."
     )

@@ -707,6 +707,20 @@ class CrowdSimVarNum(CrowdSim):
 
 
 
+        # save plot for slide show / GIF (--easy uses CrowdSimVarNum)
+        if getattr(self.config, "save_slides", False):
+            import os
+
+            folder_path = os.path.join(
+                self.config.save_path, str(self.rand_seed) + "pred"
+            )
+            if not os.path.isdir(folder_path):
+                os.makedirs(folder_path, exist_ok=True)
+            plt.savefig(
+                os.path.join(folder_path, str(self.step_counter) + ".png"),
+                dpi=120,
+            )
+
         plt.pause(0.01)
         for item in artists:
             item.remove() # there should be a better way to do this. For example,

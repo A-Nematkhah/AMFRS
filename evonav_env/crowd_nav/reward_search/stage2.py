@@ -40,7 +40,11 @@ from crowd_nav.reward_search.parallelism import (
     default_num_mini_batch,
     resolve_num_processes,
 )
-from crowd_nav.reward_search.prompts import D3_SYSTEM_PROMPT, format_d3_refinement
+from crowd_nav.reward_search.prompts import (
+    D3_SYSTEM_PROMPT,
+    format_d3_refinement,
+    format_d3_repair,
+)
 from crowd_nav.reward_search.sandbox import RewardValidator
 from crowd_nav.reward_search.state import RewardFunction
 
@@ -290,7 +294,12 @@ def _make_proxy_env_config(config: Stage2Config):
         )
         config.env_name = expected
     cfg.robot.policy = "selfAttn_merge_srnn"
-    cfg.env = copy(cfg.env)
+    # apply_regime_to_config already detaches namespaces; keep env/sim on the
+    # instance dict so Windows spawn workers see the same human_num / horizon.
+    if "env" not in cfg.__dict__:
+        cfg.env = copy(cfg.env)
+    if "sim" not in cfg.__dict__:
+        cfg.sim = copy(cfg.sim)
     cfg.env.time_limit = float(config.horizon_steps) * float(cfg.env.time_step)
     cfg.env.test_size = int(config.eval_episodes)
     cfg.sim.human_num = max(1, int(config.human_num))
@@ -694,24 +703,9 @@ class Stage2Runner:
         Single repair attempt: feed back the exact error and ask LLM to fix.
         Returns (repaired_code, error) or (None, error_reason) if repair fails.
         """
-        feedback = metrics.feedback_text()
-        repair_prompt = (
-            f"The following reward function failed validation with this error:\n\n"
-            f"ERROR: {validation_error}\n\n"
-            f"ORIGINAL CODE:\n{bad_code}\n\n"
-            f"Please fix the code to pass validation. Remember:\n"
-            f"- state.robot.px, state.robot.py, state.robot.vx, state.robot.vy, state.robot.radius, state.robot.gx, state.robot.gy, state.robot.v_pref\n"
-            f"- state.humans (iterate with 'for human in state.humans:'), each human.px, human.py, human.vx, human.vy, human.radius\n"
-            f"- state.dmin, state.discomfort_dist (TOP-LEVEL, not under robot)\n"
-            f"- state.collision, state.reaching_goal, state.timeout\n"
-            f"- state.action, state.time_step, state.global_time, state.time_limit\n"
-            f"- NO state.history, NO state.prev_state, NO state.obstacle_dist, NO state.obstacle_distance, NO state.safety_dist\n"
-            f"- Optional `import math` is allowed; or use ** 0.5 for square root\n"
-            f"- Signature must be: def compute_reward(state, memory): "
-            f"(memory is a plain dict cleared each episode)\n"
-            f"- Always return a finite float (never None)\n"
-            f"- No classes, getattr, hasattr, eval, exec, type, or dynamic field access\n\n"
-            f"Return only the corrected function in a Python code block."
+        repair_prompt = format_d3_repair(
+            bad_code=bad_code,
+            validation_error=validation_error,
         )
         full_prompt = f"{D3_SYSTEM_PROMPT}\n\n{repair_prompt}"
         try:

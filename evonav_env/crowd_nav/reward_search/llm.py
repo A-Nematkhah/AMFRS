@@ -152,6 +152,7 @@ class GroqLLMClient(LLMClient):
         }
 
         if self._key_manager is not None:
+            # Key pool owns 429 rotation + transient network retries.
             try:
                 response = self._key_manager.chat_completion(**create_kwargs)
             except ImportError as exc:
@@ -173,13 +174,19 @@ class GroqLLMClient(LLMClient):
             ) from exc
 
         from crowd_nav.reward_search.key_manager import (
+            DEFAULT_REQUEST_TIMEOUT,
             _is_rate_limit_error,
+            _is_transient_error,
             get_groq_pacer,
         )
 
         pacer = get_groq_pacer()
-        # Disable SDK auto-retry; we pace/rotate keys explicitly to avoid 429 storms.
-        client = Groq(api_key=self.api_key, max_retries=0)
+        # Disable SDK auto-retry; we pace explicitly to avoid 429 storms.
+        client = Groq(
+            api_key=self.api_key,
+            max_retries=0,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+        )
         last_error: Optional[Exception] = None
         for attempt in range(1, self.max_attempts + 1):
             pacer.wait_turn()
@@ -205,6 +212,8 @@ class GroqLLMClient(LLMClient):
                     raise RuntimeError(
                         f"Groq LLM non-retryable error for model={self.model!r}: {exc}"
                     ) from exc
+                if not _is_transient_error(exc) and not _is_rate_limit_error(exc):
+                    raise
                 if attempt >= self.max_attempts:
                     break
                 time.sleep(self.retry_delay_seconds)

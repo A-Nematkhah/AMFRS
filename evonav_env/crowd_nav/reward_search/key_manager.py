@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 COOLDOWN_SECONDS = 60
 DEFAULT_MIN_REQUEST_INTERVAL = float(os.environ.get("GROQ_MIN_REQUEST_INTERVAL", "3.0"))
+# SSL / proxy handshakes to api.groq.com can stall; default SDK timeout is too tight.
+DEFAULT_REQUEST_TIMEOUT = float(os.environ.get("GROQ_TIMEOUT_SECONDS", "120"))
+# Outer attempts across the key pool for 429 + transient network failures.
+DEFAULT_MAX_ATTEMPTS = int(os.environ.get("GROQ_MAX_ATTEMPTS", "8"))
+DEFAULT_TRANSIENT_BACKOFF = float(os.environ.get("GROQ_TRANSIENT_BACKOFF", "2.0"))
 _PLACEHOLDER_PREFIXES = ("gsk_REPLACE", "gsk_your_", "YOUR_KEY")
 
 _EVONAV_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -44,6 +49,51 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         return True
     text = str(exc).lower()
     return "rate limit" in text or "429" in text
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """
+    Network / gateway flakes that should be retried (not auth / bad-request).
+
+    Includes httpx/httpcore ConnectTimeout through proxies, Groq APITimeoutError,
+    and typical 5xx / 408 responses.
+    """
+    if _is_rate_limit_error(exc):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status in (408, 409, 425, 500, 502, 503, 504):
+        return True
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    needles = (
+        "timeout",
+        "timed out",
+        "connecterror",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "temporarily unavailable",
+        "handshake",
+        "remoteprotocolerror",
+        "readerror",
+        "writeerror",
+        "network",
+    )
+    if any(n in name for n in ("timeout", "connect", "network", "unavailable")):
+        return True
+    return any(n in text for n in needles)
+
+
+def _is_non_retryable_client_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    if status in (401, 403):
+        return True
+    if status == 404 or "model_not_found" in text or "does not exist" in text:
+        return True
+    if status == 400 and "model" in text:
+        return True
+    return False
 
 
 def _is_placeholder_key(key: str) -> bool:
@@ -198,17 +248,28 @@ class GroqKeyManager:
         from groq import Groq
 
         key = self._select_available_key()
-        return Groq(api_key=key, max_retries=0), key
+        # max_retries=0: we own pacing / key rotation / transient backoff.
+        return (
+            Groq(
+                api_key=key,
+                max_retries=0,
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            ),
+            key,
+        )
 
     def chat_completion(self, **kwargs: Any) -> Any:
         """
         Same signature as ``client.chat.completions.create(**kwargs)``.
 
-        Tries each key in the pool on rate-limit errors; other errors propagate.
+        Retries on HTTP 429 (rotate key + cooldown) and on transient network
+        errors (ConnectTimeout / APITimeout / 5xx), including proxy SSL stalls.
+        Non-retryable client errors (401/403/bad model) propagate immediately.
         """
         pacer = get_groq_pacer()
         last_exception: Optional[Exception] = None
-        for _ in range(len(self.keys)):
+        max_attempts = max(DEFAULT_MAX_ATTEMPTS, len(self.keys) * 2)
+        for attempt in range(1, max_attempts + 1):
             pacer.wait_turn()
             client, key = self.get_client()
             try:
@@ -217,6 +278,8 @@ class GroqKeyManager:
                 return response
             except Exception as exc:  # noqa: BLE001
                 last_exception = exc
+                if _is_non_retryable_client_error(exc):
+                    raise
                 if _is_rate_limit_error(exc):
                     retry_after = getattr(exc, "retry_after", None)
                     if retry_after is not None:
@@ -229,10 +292,28 @@ class GroqKeyManager:
                     self._mark_rate_limited(key)
                     self._advance()
                     continue
+                if _is_transient_error(exc):
+                    delay = min(
+                        60.0,
+                        DEFAULT_TRANSIENT_BACKOFF * (2.0 ** (attempt - 1)),
+                    )
+                    logger.warning(
+                        "Groq transient error on key ...%s "
+                        "(attempt %d/%d): %s; retrying in %.1fs",
+                        key[-6:],
+                        attempt,
+                        max_attempts,
+                        type(exc).__name__,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    # Another key may avoid a sticky broken proxy path.
+                    self._advance()
+                    continue
                 raise
         raise RuntimeError(
-            f"All {len(self.keys)} Groq API keys are rate-limited or failing. "
-            f"Last error: {last_exception}"
+            f"All {len(self.keys)} Groq API keys are rate-limited or failing "
+            f"after {max_attempts} attempts. Last error: {last_exception}"
         )
 
 

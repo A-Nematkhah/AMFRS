@@ -37,7 +37,11 @@ from crowd_nav.reward_search.parallelism import (
     default_num_mini_batch,
     resolve_num_processes,
 )
-from crowd_nav.reward_search.prompts import D3_SYSTEM_PROMPT, format_d3_refinement
+from crowd_nav.reward_search.prompts import (
+    D3_SYSTEM_PROMPT,
+    format_d3_refinement,
+    format_d3_repair,
+)
 from crowd_nav.reward_search.sandbox import RewardValidator
 from crowd_nav.reward_search.stage2 import ProxyMetrics, evaluate_proxy_policy
 
@@ -290,6 +294,8 @@ def _parse_stage3_algo_args(config: Stage3Config, candidate_id: str, round_index
 
 
 def _make_full_env_config(config: Stage3Config):
+    from copy import copy
+
     from crowd_nav.configs.config import Config
     from crowd_nav.reward_search.regime import (
         apply_regime_to_config,
@@ -313,6 +319,10 @@ def _make_full_env_config(config: Stage3Config):
         )
         config.env_name = expected
     cfg.robot.policy = "selfAttn_merge_srnn"
+    if "env" not in cfg.__dict__:
+        cfg.env = copy(cfg.env)
+    if "sim" not in cfg.__dict__:
+        cfg.sim = copy(cfg.sim)
     cfg.sim.human_num = int(config.train_human_num)
     cfg.sim.human_num_range = 0
     cfg.env.test_size = int(config.eval_episodes)
@@ -592,19 +602,9 @@ class Stage3Runner:
         metrics: ProxyMetrics,
     ) -> tuple[Optional[str], Optional[str]]:
         """One D.3 repair attempt (same contract as Stage II)."""
-        repair_prompt = (
-            f"The following reward function failed validation with this error:\n\n"
-            f"ERROR: {validation_error}\n\n"
-            f"ORIGINAL CODE:\n{bad_code}\n\n"
-            f"Please fix the code to pass validation. Remember:\n"
-            f"- state.robot.px/py/vx/vy/radius/gx/gy/v_pref; "
-            f"state.humans; state.dmin; state.discomfort_dist; "
-            f"state.collision/reaching_goal/timeout\n"
-            f"- Optional `import math` only; or use ** 0.5\n"
-            f"- Signature: def compute_reward(state, memory): "
-            f"and always return a finite float (never None)\n"
-            f"- No getattr/hasattr/eval/exec/type/classes\n\n"
-            f"Return only the corrected function in a Python code block."
+        repair_prompt = format_d3_repair(
+            bad_code=bad_code,
+            validation_error=validation_error,
         )
         full_prompt = f"{D3_SYSTEM_PROMPT}\n\n{repair_prompt}"
         try:
