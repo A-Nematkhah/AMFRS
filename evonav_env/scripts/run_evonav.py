@@ -125,7 +125,12 @@ def main() -> int:
     parser.add_argument("--stage1-generations", type=int, default=10)
 
     parser.add_argument("--stage2-rounds", type=int, default=16)
-    parser.add_argument("--stage2-train-steps", type=int, default=8000)
+    parser.add_argument(
+        "--stage2-train-steps",
+        type=int,
+        default=50_000,
+        help="K2 env steps per Stage II candidate (paper=8000; default 5e4 for ranking)",
+    )
     parser.add_argument("--stage2-eval-episodes", type=int, default=50)
     parser.add_argument("--stage2-stub", action="store_true")
 

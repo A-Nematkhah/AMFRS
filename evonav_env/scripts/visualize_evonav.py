@@ -21,6 +21,7 @@ import argparse
 import glob
 import json
 import os
+import random
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -65,16 +66,18 @@ def _find_checkpoint(run_dir: str, cand: Dict[str, Any], stage: str) -> str:
         if os.path.isfile(resolved):
             return resolved
     cid = str(cand.get("candidate_id", ""))
+    # Prefer earliest round folder (r00_*) when multiple exist — best-ever
+    # policies are often earlier than last-round refine folders.
     pattern = os.path.join(run_dir, f"{stage}_train", f"*_{cid}", "checkpoints", "*.pt")
     hits = sorted(glob.glob(pattern))
     if hits:
-        return hits[-1]
+        return hits[0]
     # Refined ids may be stored without _v2 folder suffix mismatch — try contains.
-    pattern2 = os.path.join(run_dir, f"{stage}_train", "*", "checkpoints", "*.pt")
-    for folder in sorted(glob.glob(os.path.join(run_dir, f"{stage}_train", f"*{cid}*"))):
+    folders = sorted(glob.glob(os.path.join(run_dir, f"{stage}_train", f"*{cid}*")))
+    for folder in folders:
         pts = sorted(glob.glob(os.path.join(folder, "checkpoints", "*.pt")))
         if pts:
-            return pts[-1]
+            return pts[0]
     raise FileNotFoundError(
         f"No checkpoint for candidate={cid} under {run_dir}/{stage}_train "
         f"(looked for metadata.checkpoint_path and glob {pattern})"
@@ -131,6 +134,7 @@ def visualize(
     no_display: bool,
     human_num: Optional[int],
     output_dir: Optional[str],
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     import matplotlib
 
@@ -161,7 +165,13 @@ def visualize(
     predict_method = str(run_cfg.get("predict_method") or "inferred")
     regime = str(run_cfg.get("randomization_regime") or "without_random")
     h_num = int(human_num if human_num is not None else run_cfg.get("human_num", 20))
-    seed = int(run_cfg.get("seed", 425))
+    if seed is not None:
+        seed = int(seed)
+    elif int(test_case) < 0:
+        # Random scenario each invocation (avoid always replaying seed=425 case 0).
+        seed = int(random.randint(0, 2**31 - 1))
+    else:
+        seed = int(run_cfg.get("seed", 425))
     env_name = env_name_for_predict_method(predict_method)
 
     s3_cfg = Stage3Config(
@@ -215,7 +225,7 @@ def visualize(
     print(f"[viz] candidate={candidate.candidate_id} ckpt={ckpt_path}")
     print(
         f"[viz] env={env_name} predict={predict_method} humans={h_num} "
-        f"episodes={episodes} device={device}"
+        f"episodes={episodes} test_case={test_case} seed={seed} device={device}"
     )
 
     envs = make_vec_envs(
@@ -302,7 +312,19 @@ def main() -> int:
         help="Which train/ folder to search for checkpoints",
     )
     parser.add_argument("--episodes", type=int, default=2)
-    parser.add_argument("--test-case", type=int, default=0, help="Fixed case (>=0) or -1 for random")
+    parser.add_argument(
+        "--test-case",
+        type=int,
+        default=-1,
+        help="Scenario id (>=0 fixed/reproducible); -1 = random each run (default)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Env RNG seed (default: run config seed). Change this with --test-case -1 "
+        "for a different random stream.",
+    )
     parser.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     parser.add_argument("--human-num", type=int, default=None, help="Must match training obs width")
     parser.add_argument("--save-slides", action="store_true", help="Write per-step PNGs")
@@ -349,6 +371,7 @@ def main() -> int:
             no_display=no_display,
             human_num=args.human_num,
             output_dir=args.output_dir,
+            seed=args.seed,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

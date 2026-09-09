@@ -46,6 +46,10 @@ from crowd_nav.reward_search.prompts import (
     format_d3_repair,
 )
 from crowd_nav.reward_search.sandbox import RewardValidator
+from crowd_nav.reward_search.selection import (
+    candidate_nav_scalar,
+    is_same_genome,
+)
 from crowd_nav.reward_search.state import RewardFunction
 
 logger = logging.getLogger(__name__)
@@ -62,7 +66,7 @@ class Stage2Config:
 
     population_size: int = 8
     rounds: int = 16  # G2
-    train_env_steps: int = 8000  # K2
+    train_env_steps: int = 50_000  # practical default; paper Table 5 K2=8000
     eval_episodes: int = 50  # E2
     horizon_steps: int = 100  # T_short
     algo: str = "a2c"
@@ -79,6 +83,8 @@ class Stage2Config:
     randomization_regime: str = "without_random"
     output_root: str = "trained_models/stage2"
     device: str = "cpu"
+    # Do not LLM-mutate the current best-ever genome (prevents refine regression).
+    protect_elite_refine: bool = True
 
 
 @dataclass
@@ -688,9 +694,61 @@ class Stage2Runner:
         self.config = config or Stage2Config()
         self.history: List[Stage2RoundRecord] = []
         self.validation_failures: List[Dict[str, Any]] = []
+        # Trained (pre-refine) snapshots; best_trained is best-ever by SR-CR-0.5TR.
+        self.trained_snapshots: List[RewardCandidate] = []
+        self.best_trained: Optional[RewardCandidate] = None
         # Optional paper-scale resume (set by PaperScaleRunner).
         self.checkpoint_store = None  # type: ignore[assignment]
         self.checkpoint_seed: int = int(self.config.seed)
+
+    def _record_trained_snapshot(
+        self,
+        candidate: RewardCandidate,
+        metrics: ProxyMetrics,
+        *,
+        round_index: int,
+        checkpoint_path: Optional[str] = None,
+    ) -> RewardCandidate:
+        """Freeze the genome that produced ``metrics`` (before any LLM refine)."""
+        snapshot = replace(
+            candidate,
+            metadata={
+                **(candidate.metadata or {}),
+                "last_metrics": metrics.as_dict(),
+                "checkpoint_path": checkpoint_path,
+                "trained_round": int(round_index),
+                "trained_snapshot": True,
+            },
+        )
+        self.trained_snapshots.append(snapshot)
+        score = metrics.scalar_score()
+        prev = (
+            candidate_nav_scalar(self.best_trained)
+            if self.best_trained is not None
+            else float("-inf")
+        )
+        if score > prev:
+            self.best_trained = snapshot
+            logger.info(
+                "Stage II new best-ever %s scalar=%.4f (round=%s)",
+                snapshot.candidate_id,
+                score,
+                round_index,
+            )
+            console.status(
+                f"new best-ever {snapshot.candidate_id} "
+                f"SR-CR-0.5TR={score:.3f}",
+                stage="Stage II",
+            )
+        return snapshot
+
+    def _skip_refine_for_elite(self, candidate: RewardCandidate) -> bool:
+        """Do not LLM-mutate the current best-ever genome."""
+        if not bool(getattr(self.config, "protect_elite_refine", True)):
+            return False
+        return self.best_trained is not None and is_same_genome(
+            candidate, self.best_trained
+        )
 
     def _repair_invalid_code(
         self,
@@ -835,6 +893,21 @@ class Stage2Runner:
                 },
             )
 
+        # New code is untested — do not attach parent train metrics as its own.
+        parent_md = {
+            k: v
+            for k, v in (candidate.metadata or {}).items()
+            if k
+            not in (
+                "last_metrics",
+                "checkpoint_path",
+                "trained_snapshot",
+                "trained_round",
+                "refine_kept_previous",
+                "refine_error",
+                "refine_skipped_elite",
+            )
+        }
         return replace(
             candidate,
             candidate_id=_v2_candidate_id(candidate.candidate_id),
@@ -845,9 +918,10 @@ class Stage2Runner:
             origin="refinement",
             parent_ids=(candidate.candidate_id,),
             metadata={
-                **candidate.metadata,
+                **parent_md,
                 "refine_kept_previous": False,
-                "last_metrics": metrics.as_dict(),
+                "parent_metrics": metrics.as_dict(),
+                "parent_id": candidate.candidate_id,
             },
         )
 
@@ -892,10 +966,41 @@ class Stage2Runner:
                     "resumed": resumed,
                 }
             next_pop.append(refined)
+        next_pop = self._inject_elite(next_pop)
         console.stage_round_summary(
             "Stage II", round_index, self.config.rounds, round_records
         )
         return next_pop
+
+    def _inject_elite(
+        self, population: List[RewardCandidate]
+    ) -> List[RewardCandidate]:
+        """Keep best-ever genome in the next round population (elitism)."""
+        elite = self.best_trained
+        if elite is None or not population:
+            return population
+        if any(is_same_genome(c, elite) for c in population):
+            return population
+        worst_i = min(
+            range(len(population)),
+            key=lambda i: candidate_nav_scalar(population[i]),
+        )
+        logger.info(
+            "Elitism: injecting best-ever %s (replacing %s)",
+            elite.candidate_id,
+            population[worst_i].candidate_id,
+        )
+        # Carry elite code forward; drop stale refine flags for a clean retrain.
+        population[worst_i] = replace(
+            elite,
+            metadata={
+                **(elite.metadata or {}),
+                "elite_injected": True,
+                "refine_kept_previous": True,
+                "refine_skipped_elite": False,
+            },
+        )
+        return population
 
     def _train_refine_one(
         self,
@@ -953,14 +1058,34 @@ class Stage2Runner:
                             resumed=True,
                         )
                     )
+                self._record_trained_snapshot(
+                    cand, metrics, round_index=round_index
+                )
                 return refined, metrics, kept, 0.0, True
 
         t0 = time.perf_counter()
         metrics = self.trainer.train_and_eval(
             cand, round_index=round_index, config=self.config
         )
-        refined = self.refine_candidate(cand, metrics)
-        kept = bool(refined.metadata.get("refine_kept_previous"))
+        self._record_trained_snapshot(cand, metrics, round_index=round_index)
+        if self._skip_refine_for_elite(cand):
+            logger.info(
+                "Skipping D.3 refine for elite genome %s (protect best-ever)",
+                cand.candidate_id,
+            )
+            refined = replace(
+                cand,
+                metadata={
+                    **(cand.metadata or {}),
+                    "refine_kept_previous": True,
+                    "refine_skipped_elite": True,
+                    "last_metrics": metrics.as_dict(),
+                },
+            )
+            kept = True
+        else:
+            refined = self.refine_candidate(cand, metrics)
+            kept = bool(refined.metadata.get("refine_kept_previous"))
         wall_s = float(time.perf_counter() - t0)
         if store is not None and key is not None:
             store.save(

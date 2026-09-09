@@ -113,13 +113,16 @@ def test_stage3_run_refines_to_v3_and_h_sweep():
             train_env_steps=100,
             eval_episodes=2,
             human_counts=(5, 10, 20),
+            protect_elite_refine=False,
         ),
     )
     out = runner.run(pop, run_h_sweep=True)
     assert len(out) == n
-    assert all(c.candidate_id.endswith("_v3") for c in out)
+    assert runner.best_trained is not None
     assert len(runner.history) == n
-    assert len(runner.sweep_reports) == n
+    assert any(r.refined and not r.kept_previous for r in runner.history)
+    # H-sweep runs on best-ever only.
+    assert len(runner.sweep_reports) == 1
     for report in runner.sweep_reports:
         assert set(report.by_human_count) == {5, 10, 20}
         table = report.summary_table()
@@ -136,7 +139,12 @@ def test_failed_refinement_keeps_previous(caplog):
     runner = Stage3Runner(
         client,
         StubPolicyTrainer(),
-        config=Stage3Config(population_size=1, rounds=1, human_counts=(5,)),
+        config=Stage3Config(
+            population_size=1,
+            rounds=1,
+            human_counts=(5,),
+            protect_elite_refine=False,
+        ),
     )
     with caplog.at_level(logging.WARNING):
         out = runner.run(pop, run_h_sweep=True)

@@ -25,6 +25,11 @@ from crowd_nav.reward_search.reporting import candidate_to_dict, write_json
 from crowd_nav.reward_search.sandbox import RewardValidator
 from crowd_nav.reward_search.scoring import make_score1_fn, make_smoke_score_fn
 from crowd_nav.reward_search.dataset import load_stage1_dataset
+from crowd_nav.reward_search.selection import (
+    candidate_nav_scalar,
+    navigation_scalar_from_dict,
+    pick_best_trained,
+)
 from crowd_nav.reward_search.stage2 import (
     Stage2Config,
     Stage2Runner,
@@ -57,9 +62,11 @@ class EvoNavRunConfig:
     stage1_population: int = 8
     stage1_generations: int = 10
 
-    # Stage II
+    # Stage II — paper Table 5 uses K2=8000; that is too short to rank rewards
+    # reliably in practice. Default 5e4 for local/scaled runs; paper_scale.py
+    # still forces PAPER_K2=8000 when reproducing the paper budget.
     stage2_rounds: int = 16
-    stage2_train_steps: int = 8000
+    stage2_train_steps: int = 50_000
     stage2_eval_episodes: int = 50
     stage2_horizon: int = 100
     stage2_use_stub: bool = False
@@ -346,11 +353,16 @@ class EvoNavPipeline:
             s2_runner.checkpoint_store = self.checkpoint_store
             s2_runner.checkpoint_seed = int(cfg.seed)
         stage2_pop = s2_runner.run(stage1_pop)
-        best_s2 = self._best_by_last_metrics(stage2_pop, s2_runner.history)
+        best_s2 = s2_runner.best_trained or self._best_by_ever_metrics(
+            stage2_pop, s2_runner.history, s2_runner.trained_snapshots
+        )
         write_json(
             os.path.join(cfg.output_dir, "stage2_population.json"),
             {
                 "population": [candidate_to_dict(c) for c in stage2_pop],
+                "best_trained_id": (
+                    best_s2.candidate_id if best_s2 is not None else None
+                ),
                 "history": [
                     {
                         "round_index": r.round_index,
@@ -368,11 +380,29 @@ class EvoNavPipeline:
             candidate_to_dict(best_s2),
         )
         console.status(
-            f"Stage II complete - best={best_s2.candidate_id}",
+            f"Stage II complete - best={best_s2.candidate_id} "
+            f"scalar={candidate_nav_scalar(best_s2):.3f}",
             stage="pipeline",
         )
 
         # ----- Stage III -----
+        # H-sweep only at H <= training crowd size (obs / Policy width).
+        # Paper set {5,10,15,20} when human_num=20; with --human-num 5 → {5}.
+        h_train = max(1, int(cfg.human_num))
+        if cfg.stage3_run_h_sweep:
+            swept = [h for h in (5, 10, 15, 20) if h <= h_train]
+            if h_train not in swept:
+                swept.append(h_train)
+            human_counts = tuple(sorted(set(swept)))
+            if len(human_counts) <= 1:
+                console.status(
+                    f"H-sweep enabled but only H={human_counts} "
+                    f"(train human_num={h_train}); raise --human-num "
+                    f"for multi-H Table-6 generalization",
+                    stage="pipeline",
+                )
+        else:
+            human_counts = (h_train,)
         s3_cfg = Stage3Config(
             population_size=len(stage2_pop),
             rounds=cfg.stage3_rounds,
@@ -381,11 +411,9 @@ class EvoNavPipeline:
             seed=cfg.seed,
             device=cfg.device,
             num_processes=cfg.num_processes,
-            train_human_num=int(cfg.human_num),
+            train_human_num=h_train,
             output_root=os.path.join(cfg.output_dir, "stage3_train"),
-            human_counts=(5, 10, 15, 20)
-            if cfg.stage3_run_h_sweep
-            else (int(cfg.human_num),),
+            human_counts=human_counts,
             randomization_regime=regime,
             predict_method=predict_method,
             env_name=env_name_for_predict_method(predict_method),
@@ -404,11 +432,16 @@ class EvoNavPipeline:
             s3_runner.checkpoint_store = self.checkpoint_store
             s3_runner.checkpoint_seed = int(cfg.seed)
         stage3_pop = s3_runner.run(stage2_pop, run_h_sweep=cfg.stage3_run_h_sweep)
-        best_s3 = self._best_by_last_metrics(stage3_pop, s3_runner.history)
+        best_s3 = s3_runner.best_trained or self._best_by_ever_metrics(
+            stage3_pop, s3_runner.history, s3_runner.trained_snapshots
+        )
         write_json(
             os.path.join(cfg.output_dir, "stage3_population.json"),
             {
                 "population": [candidate_to_dict(c) for c in stage3_pop],
+                "best_trained_id": (
+                    best_s3.candidate_id if best_s3 is not None else None
+                ),
                 "history": [
                     {
                         "round_index": r.round_index,
@@ -416,6 +449,7 @@ class EvoNavPipeline:
                         "metrics": r.metrics.as_dict(),
                         "refined": r.refined,
                         "kept_previous": r.kept_previous,
+                        "checkpoint_path": r.checkpoint_path,
                     }
                     for r in s3_runner.history
                 ],
@@ -441,7 +475,8 @@ class EvoNavPipeline:
             candidate_to_dict(best_s3),
         )
         console.status(
-            f"Stage III complete - best={best_s3.candidate_id}",
+            f"Stage III complete - best={best_s3.candidate_id} "
+            f"scalar={candidate_nav_scalar(best_s3):.3f}",
             stage="pipeline",
         )
 
@@ -472,24 +507,43 @@ class EvoNavPipeline:
         )
 
     @staticmethod
-    def _best_by_last_metrics(population, history) -> RewardCandidate:
-        """Pick candidate with highest last-round SR - CR - 0.5*TR."""
-        last_metrics: Dict[str, Any] = {}
+    def _best_by_ever_metrics(
+        population,
+        history,
+        trained_snapshots=None,
+    ) -> RewardCandidate:
+        """
+        Pick the best-ever trained genome by SR - CR - 0.5*TR across all rounds.
+
+        Prefers explicit trained snapshots (correct code+metrics+checkpoint).
+        Falls back to history scan + final population mapping.
+        """
+        if trained_snapshots:
+            best = pick_best_trained(trained_snapshots)
+            if best is not None:
+                return best
+
+        best_hist = None
+        best_score = float("-inf")
         if history:
-            max_round = max(r.round_index for r in history)
             for r in history:
-                if r.round_index == max_round:
-                    last_metrics[r.candidate_id] = r.metrics
+                score = float(r.metrics.scalar_score())
+                if score > best_score:
+                    best_score = score
+                    best_hist = r
 
         def _key(c: RewardCandidate):
             m = (c.metadata or {}).get("last_metrics")
             if m:
-                return float(m.get("SR", 0) - m.get("CR", 0) - 0.5 * m.get("TR", 0))
-            # Map refined ids back to parent history keys.
-            for pid in list(c.parent_ids) + [c.candidate_id]:
-                if pid in last_metrics:
-                    pm = last_metrics[pid]
-                    return float(pm.sr - pm.cr - 0.5 * pm.tr)
+                return navigation_scalar_from_dict(m)
+            if best_hist is not None and (
+                c.candidate_id == best_hist.candidate_id
+                or best_hist.candidate_id in (c.parent_ids or ())
+            ):
+                return best_score
             return float(c.score or float("-inf"))
 
         return max(population, key=_key)
+
+    # Backward-compatible alias (older call sites / notebooks).
+    _best_by_last_metrics = _best_by_ever_metrics

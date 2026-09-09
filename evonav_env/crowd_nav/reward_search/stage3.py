@@ -43,6 +43,10 @@ from crowd_nav.reward_search.prompts import (
     format_d3_repair,
 )
 from crowd_nav.reward_search.sandbox import RewardValidator
+from crowd_nav.reward_search.selection import (
+    candidate_nav_scalar,
+    is_same_genome,
+)
 from crowd_nav.reward_search.stage2 import ProxyMetrics, evaluate_proxy_policy
 
 logger = logging.getLogger(__name__)
@@ -93,6 +97,8 @@ class Stage3Config:
     device: str = "cpu"
     train_human_num: int = 20  # training population size (obs / Policy width)
     human_counts: Tuple[int, ...] = STAGE3_HUMAN_COUNTS
+    # Do not LLM-mutate the current best-ever genome (prevents refine regression).
+    protect_elite_refine: bool = True
 
 
 @dataclass
@@ -590,9 +596,87 @@ class Stage3Runner:
         self.validation_failures: List[Dict[str, Any]] = []
         self.last_bundles: Dict[str, TrainEvalBundle] = {}
         self.sweep_reports: List[HumanSweepReport] = []
+        self.trained_snapshots: List[RewardCandidate] = []
+        self.best_trained: Optional[RewardCandidate] = None
         # Optional paper-scale resume (set by PaperScaleRunner).
         self.checkpoint_store = None  # type: ignore[assignment]
         self.checkpoint_seed: int = int(self.config.seed)
+
+    def _record_trained_snapshot(
+        self,
+        candidate: RewardCandidate,
+        bundle: TrainEvalBundle,
+        *,
+        round_index: int,
+    ) -> RewardCandidate:
+        """Freeze the genome that produced ``bundle.metrics`` (pre-refine)."""
+        snapshot = replace(
+            candidate,
+            metadata={
+                **(candidate.metadata or {}),
+                "last_metrics": bundle.metrics.as_dict(),
+                "checkpoint_path": bundle.checkpoint_path,
+                "trained_round": int(round_index),
+                "trained_snapshot": True,
+            },
+        )
+        self.trained_snapshots.append(snapshot)
+        self.last_bundles[candidate.candidate_id] = bundle
+        score = bundle.metrics.scalar_score()
+        prev = (
+            candidate_nav_scalar(self.best_trained)
+            if self.best_trained is not None
+            else float("-inf")
+        )
+        if score > prev:
+            self.best_trained = snapshot
+            logger.info(
+                "Stage III new best-ever %s scalar=%.4f (round=%s)",
+                snapshot.candidate_id,
+                score,
+                round_index,
+            )
+            console.status(
+                f"new best-ever {snapshot.candidate_id} "
+                f"SR-CR-0.5TR={score:.3f}",
+                stage="Stage III",
+            )
+        return snapshot
+
+    def _skip_refine_for_elite(self, candidate: RewardCandidate) -> bool:
+        if not bool(getattr(self.config, "protect_elite_refine", True)):
+            return False
+        return self.best_trained is not None and is_same_genome(
+            candidate, self.best_trained
+        )
+
+    def _inject_elite(
+        self, population: List[RewardCandidate]
+    ) -> List[RewardCandidate]:
+        elite = self.best_trained
+        if elite is None or not population:
+            return population
+        if any(is_same_genome(c, elite) for c in population):
+            return population
+        worst_i = min(
+            range(len(population)),
+            key=lambda i: candidate_nav_scalar(population[i]),
+        )
+        logger.info(
+            "Elitism: injecting best-ever %s (replacing %s)",
+            elite.candidate_id,
+            population[worst_i].candidate_id,
+        )
+        population[worst_i] = replace(
+            elite,
+            metadata={
+                **(elite.metadata or {}),
+                "elite_injected": True,
+                "refine_kept_previous": True,
+                "refine_skipped_elite": False,
+            },
+        )
+        return population
 
     def _repair_invalid_code(
         self,
@@ -710,6 +794,21 @@ class Stage3Runner:
                 },
             )
 
+        # New code is untested — do not attach parent train metrics as its own.
+        parent_md = {
+            k: v
+            for k, v in (candidate.metadata or {}).items()
+            if k
+            not in (
+                "last_metrics",
+                "checkpoint_path",
+                "trained_snapshot",
+                "trained_round",
+                "refine_kept_previous",
+                "refine_error",
+                "refine_skipped_elite",
+            )
+        }
         return replace(
             candidate,
             candidate_id=_v3_candidate_id(candidate.candidate_id),
@@ -720,9 +819,10 @@ class Stage3Runner:
             origin="refinement",
             parent_ids=(candidate.candidate_id,),
             metadata={
-                **candidate.metadata,
+                **parent_md,
                 "refine_kept_previous": False,
-                "last_metrics": metrics.as_dict(),
+                "parent_metrics": metrics.as_dict(),
+                "parent_id": candidate.candidate_id,
             },
         )
 
@@ -763,6 +863,7 @@ class Stage3Runner:
             self.last_bundles[cand.candidate_id] = bundle
             self.last_bundles[refined.candidate_id] = bundle
             next_pop.append(refined)
+        next_pop = self._inject_elite(next_pop)
         console.stage_round_summary(
             "Stage III", round_index, self.config.rounds, round_records
         )
@@ -821,22 +922,55 @@ class Stage3Runner:
                             resumed=True,
                         )
                     )
+                self._record_trained_snapshot(
+                    cand, bundle, round_index=round_index
+                )
                 return refined, bundle, kept
 
         t0 = time.perf_counter()
         bundle = self.trainer.train_and_eval(
             cand, round_index=round_index, config=self.config
         )
-        refined = self.refine_candidate(cand, bundle.metrics)
-        refined = replace(
-            refined,
-            metadata={
-                **refined.metadata,
-                "checkpoint_path": bundle.checkpoint_path,
-                "last_metrics": bundle.metrics.as_dict(),
-            },
-        )
-        kept = bool(refined.metadata.get("refine_kept_previous"))
+        self._record_trained_snapshot(cand, bundle, round_index=round_index)
+        if self._skip_refine_for_elite(cand):
+            logger.info(
+                "Skipping D.3 refine for elite genome %s (protect best-ever)",
+                cand.candidate_id,
+            )
+            refined = replace(
+                cand,
+                metadata={
+                    **(cand.metadata or {}),
+                    "refine_kept_previous": True,
+                    "refine_skipped_elite": True,
+                    "checkpoint_path": bundle.checkpoint_path,
+                    "last_metrics": bundle.metrics.as_dict(),
+                },
+            )
+            kept = True
+        else:
+            refined = self.refine_candidate(cand, bundle.metrics)
+            kept = bool(refined.metadata.get("refine_kept_previous"))
+            if kept:
+                # Kept previous genome — attach this round's train metrics.
+                refined = replace(
+                    refined,
+                    metadata={
+                        **refined.metadata,
+                        "checkpoint_path": bundle.checkpoint_path,
+                        "last_metrics": bundle.metrics.as_dict(),
+                    },
+                )
+            else:
+                # New untested genome: keep parent pointers only.
+                refined = replace(
+                    refined,
+                    metadata={
+                        **refined.metadata,
+                        "parent_checkpoint_path": bundle.checkpoint_path,
+                        "parent_metrics": bundle.metrics.as_dict(),
+                    },
+                )
         wall_s = float(time.perf_counter() - t0)
         if store is not None and key is not None:
             store.save(
@@ -899,5 +1033,11 @@ class Stage3Runner:
             pop = self.run_round(pop, round_index=r)
         if run_h_sweep:
             console.status("running H-sweep generalization...", stage="Stage III")
-            self.run_generalization_sweep(pop)
+            # Prefer best-ever trained policy (matches final selection).
+            sweep_pop: List[RewardCandidate]
+            if self.best_trained is not None:
+                sweep_pop = [self.best_trained]
+            else:
+                sweep_pop = pop
+            self.run_generalization_sweep(sweep_pop)
         return pop

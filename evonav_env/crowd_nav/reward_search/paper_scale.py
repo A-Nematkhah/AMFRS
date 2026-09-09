@@ -50,10 +50,6 @@ def extract_final_metrics(seed_dir: str) -> Dict[str, float]:
             pop = json.load(f)
         hist = pop.get("history") or []
         if hist:
-            last_round = max(int(h.get("round_index", -1)) for h in hist)
-            rows = [
-                h for h in hist if int(h.get("round_index", -1)) == last_round
-            ]
 
             def _score(h: Dict[str, Any]) -> float:
                 m = h.get("metrics") or {}
@@ -61,7 +57,8 @@ def extract_final_metrics(seed_dir: str) -> Dict[str, float]:
                     m.get("SR", 0) - m.get("CR", 0) - 0.5 * m.get("TR", 0)
                 )
 
-            best = max(rows, key=_score)
+            # Best-ever across all rounds (not last-round only).
+            best = max(hist, key=_score)
             m = best.get("metrics") or {}
             return {k: float(m[k]) for k in _METRIC_KEYS if k in m}
 

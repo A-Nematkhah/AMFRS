@@ -88,15 +88,37 @@ def test_stage2_run_refines_to_v2_with_stub():
             train_env_steps=8,
             eval_episodes=2,
             horizon_steps=5,
+            protect_elite_refine=False,
         ),
     )
     out = runner.run(pop)
     assert len(out) == n
-    assert all(c.candidate_id.endswith("_v2") for c in out)
-    assert all(c.origin == "refinement" for c in out)
+    assert runner.best_trained is not None
     assert len(runner.history) == n
-    assert all(r.refined and not r.kept_previous for r in runner.history)
+    # With elitism, best-ever genome may be re-injected without a _v2 id.
+    assert any(r.refined and not r.kept_previous for r in runner.history)
+    assert any(c.candidate_id.endswith("_v2") or c.origin == "refinement" for c in out)
     assert runner.validation_failures == []
+
+
+def test_stage2_protects_elite_from_refine():
+    n = 2
+    pop = _make_population(n)
+    client = ScriptedLLMClient([_valid_code(99.0), _valid_code(100.0)])
+    runner = Stage2Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage2Config(
+            population_size=n,
+            rounds=1,
+            protect_elite_refine=True,
+        ),
+    )
+    out = runner.run(pop)
+    assert runner.best_trained is not None
+    assert any((c.metadata or {}).get("refine_skipped_elite") for c in out)
+    # Elite genome is preserved for final selection even if later rounds degrade.
+    assert (runner.best_trained.metadata or {}).get("trained_snapshot") is True
 
 
 def test_failed_refinement_keeps_previous_and_logs(caplog):
@@ -105,7 +127,9 @@ def test_failed_refinement_keeps_previous_and_logs(caplog):
     runner = Stage2Runner(
         client,
         StubPolicyTrainer(),
-        config=Stage2Config(population_size=1, rounds=1),
+        config=Stage2Config(
+            population_size=1, rounds=1, protect_elite_refine=False
+        ),
     )
     with caplog.at_level(logging.WARNING):
         out = runner.run(pop)
@@ -130,7 +154,9 @@ def test_llm_error_keeps_previous():
     runner = Stage2Runner(
         BoomClient(),  # type: ignore[arg-type]
         StubPolicyTrainer(),
-        config=Stage2Config(population_size=1, rounds=1),
+        config=Stage2Config(
+            population_size=1, rounds=1, protect_elite_refine=False
+        ),
     )
     out = runner.run(pop)
     assert out[0].candidate_id == "c0"
@@ -147,7 +173,8 @@ def test_table5_defaults():
     cfg = Stage2Config()
     assert cfg.population_size == 8
     assert cfg.rounds == 16
-    assert cfg.train_env_steps == 8000
+    # Practical default raised for reward ranking; paper K2=8000 via paper_scale.
+    assert cfg.train_env_steps == 50_000
     assert cfg.eval_episodes == 50
     assert cfg.horizon_steps == 100
     assert cfg.algo == "a2c"

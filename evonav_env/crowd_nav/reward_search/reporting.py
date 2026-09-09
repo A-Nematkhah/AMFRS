@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from crowd_nav.reward_search.stage2 import ProxyMetrics, pin_episode_human_count
 
@@ -321,6 +320,9 @@ def evaluate_saved_model(
     torch_device = torch.device(
         "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
     )
+    # Keep GST pretext wrapper buffers on the same device as Policy / obs.
+    if hasattr(env_config, "training"):
+        env_config.training.device = str(torch_device)
     torch.manual_seed(seed)
 
     envs = make_vec_envs(
@@ -354,7 +356,9 @@ def evaluate_saved_model(
         )
         actor_critic.load_state_dict(torch.load(load_path, map_location=torch_device))
         actor_critic.base.nenv = 1
-        nn.DataParallel(actor_critic).to(torch_device)
+        # Avoid DataParallel for single-env eval (device mismatch with GST wrappers).
+        actor_critic.to(torch_device)
+        actor_critic.eval()
 
     episodes = _rollout_episodes(
         actor_critic,
