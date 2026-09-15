@@ -24,6 +24,13 @@ def test_amfrs2_fast_run_writes_manifest(tmp_path):
     assert data["pipeline"] == "AMFRS2"
     assert data["n_accepted"] >= 1
     assert data["config"]["fast"] is True
+    # Final climb must evaluate rungs above illumination (F2 in fast profile).
+    levels = [e["level"] for e in data.get("promotion_log") or []]
+    assert any(str(lv).startswith("F2") for lv in levels), levels
+    # Per-gen cost_trace spent_cost must move (not stick at the global counter).
+    costs = [float(e["spent_cost"]) for e in artifacts.cost_trace]
+    assert costs, "expected cost_trace entries"
+    assert max(costs) > 0.0
 
 
 def test_amfrs2_config_does_not_subclass_baseline():

@@ -34,3 +34,25 @@ def test_policy_sweep_stub_keys(tmp_path):
     assert "robustness_scalar" in attached.metadata
     best = pick_best_by_robustness([attached])
     assert best is not None
+
+
+def test_real_sweep_does_not_silent_stub_fallback(monkeypatch):
+    cand = RewardCandidate(
+        candidate_id="c0",
+        code="def compute_reward(state, memory):\n    return float(5.0)\n",
+        valid=True,
+        metadata={},
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("trainer exploded")
+
+    monkeypatch.setattr(
+        "crowd_nav.reward_search.amfrs.robustness._run_policy_sweep_real",
+        _boom,
+    )
+    try:
+        run_policy_sweep(cand, use_stub=False, allow_stub_fallback=False)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "trainer exploded" in str(exc)

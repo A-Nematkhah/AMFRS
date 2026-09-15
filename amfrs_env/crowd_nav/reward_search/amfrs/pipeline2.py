@@ -112,6 +112,8 @@ class AMFRS2Pipeline:
         self.promotion_log: List[Dict[str, Any]] = []
         self.cost_trace: List[Dict[str, Any]] = []
         self._spent = [0.0]
+        # Active cost box for the current scheduler.run (may be a per-gen box).
+        self._active_spent: List[float] = self._spent
         self._best_metric = float("-inf")
 
     @staticmethod
@@ -187,12 +189,13 @@ class AMFRS2Pipeline:
         return out
 
     def _on_rung_complete(self, level_name: str, survivors: List[RewardCandidate]) -> None:
+        active = self._active_spent if self._active_spent is not None else self._spent
         self.promotion_log.append(
             {
                 "level": level_name,
                 "n_survivors": len(survivors),
                 "ids": [c.candidate_id for c in survivors],
-                "spent_cost": float(self._spent[0]),
+                "spent_cost": float(active[0]),
             }
         )
         for cand in survivors:
@@ -202,7 +205,8 @@ class AMFRS2Pipeline:
                 self._best_metric = metric
             self.cost_trace.append(
                 {
-                    "spent_cost": float(self._spent[0]),
+                    "spent_cost": float(active[0]),
+                    "global_spent_cost": float(self._spent[0]),
                     "best_metric": float(self._best_metric),
                     "level": level_name,
                     "candidate_id": cand.candidate_id,
@@ -245,7 +249,14 @@ class AMFRS2Pipeline:
             output_root=os.path.join(cfg.output_dir, "trained_models"),
         )
 
-    def _build_scheduler(self, max_rung: str) -> SuccessiveHalvingScheduler:
+    def _build_scheduler(
+        self,
+        max_rung: str,
+        *,
+        after_rung: Optional[str] = None,
+        max_cost_units: Optional[float] = None,
+        use_generation_budget: bool = True,
+    ) -> SuccessiveHalvingScheduler:
         use_stub = bool(self.config.use_stub_trainers or self.config.fast)
         ladder = build_default_ladder(
             use_stub=use_stub,
@@ -254,16 +265,35 @@ class AMFRS2Pipeline:
             trainer_ctx=None if use_stub else self._trainer_ctx(),
         )
         try:
-            ladder = ladder.truncate_to(max_rung)
-        except KeyError:
-            logger.warning("Unknown rung %s; using full ladder", max_rung)
+            if after_rung is not None and after_rung != max_rung:
+                ladder = ladder.slice_after(after_rung, max_rung)
+            else:
+                ladder = ladder.truncate_to(max_rung)
+        except (KeyError, ValueError) as exc:
+            logger.warning(
+                "Could not build ladder max=%s after=%s (%s); using truncate_to(%s)",
+                max_rung,
+                after_rung,
+                exc,
+                max_rung,
+            )
+            ladder = build_default_ladder(
+                use_stub=use_stub,
+                score1_mode=self.config.score1_mode,
+                stage1_dataset_path=self.config.stage1_dataset_path,
+                trainer_ctx=None if use_stub else self._trainer_ctx(),
+            ).truncate_to(max_rung)
         bandit = UCB1Allocator(cost_aware=True) if self.config.use_bandit else None
+        if use_generation_budget:
+            cost_cap: Optional[float] = float(self.config.max_cost_units_per_generation)
+        else:
+            cost_cap = max_cost_units  # may be None → uncapped
         return SuccessiveHalvingScheduler(
             ladder,
             HalvingConfig(
                 eta=int(self.config.halving_eta),
                 min_survivors=int(self.config.halving_min_survivors),
-                max_cost_units=float(self.config.max_cost_units_per_generation),
+                max_cost_units=cost_cap,
             ),
             bandit=bandit,
         )
@@ -364,6 +394,7 @@ class AMFRS2Pipeline:
                 accepted.append(cand)
 
         # Initial halving climb (up to illumination_max_rung, then optionally final)
+        self._active_spent = self._spent
         sched = self._build_scheduler(cfg.illumination_max_rung)
         survivors = sched.run(
             accepted,
@@ -384,6 +415,7 @@ class AMFRS2Pipeline:
                 continue
             # Reset per-generation spent counter but keep global trace
             gen_spent = [0.0]
+            self._active_spent = gen_spent
             gen_sched = self._build_scheduler(cfg.illumination_max_rung)
             survivors = gen_sched.run(
                 children,
@@ -391,6 +423,7 @@ class AMFRS2Pipeline:
                 spent_cost=gen_spent,
             )
             self._spent[0] += gen_spent[0]
+            self._active_spent = self._spent
             coverages.append(self.archive.coverage())
 
         # Finalists: archive elites or scalar top survivors
@@ -399,33 +432,60 @@ class AMFRS2Pipeline:
         else:
             finalists = list(survivors)
 
-        # Optional final rung bump
+        # Optional final rung bump: only rungs ABOVE illumination (no F0 restart).
         if finalists and cfg.final_rung and cfg.final_rung != cfg.illumination_max_rung:
-            final_sched = self._build_scheduler(cfg.final_rung)
+            final_spent = [0.0]
+            self._active_spent = final_spent
+            final_sched = self._build_scheduler(
+                cfg.final_rung,
+                after_rung=cfg.illumination_max_rung,
+                max_cost_units=cfg.final_rung_max_cost_units,
+                use_generation_budget=False,
+            )
             finalists = final_sched.run(
                 finalists,
                 on_rung_complete=self._on_rung_complete,
-                spent_cost=self._spent,
+                spent_cost=final_spent,
             )
+            self._spent[0] += final_spent[0]
+            self._active_spent = self._spent
 
         # Axis 4 robustness on finalists
         if cfg.run_robustness_sweep and finalists:
             robustified = []
             for cand in finalists:
-                by_pol = run_policy_sweep(
-                    cand,
-                    policies=tuple(cfg.robustness_policies),
-                    use_stub=use_stub,
-                    train_steps=min(8_000, int(cfg.stage2_train_steps_short)),
-                    eval_episodes=min(20, int(cfg.stage2_eval_episodes)),
-                    device=str(cfg.device),
-                    # Prefer none when GST missing even if train used none already
-                    predict_method=str(cfg.predict_method),
-                    human_num=int(cfg.human_num),
-                    seed=int(cfg.seed),
-                    output_root=os.path.join(cfg.output_dir, "robustness"),
-                )
-                robustified.append(attach_robustness_profile(cand, by_pol))
+                try:
+                    by_pol = run_policy_sweep(
+                        cand,
+                        policies=tuple(cfg.robustness_policies),
+                        use_stub=use_stub,
+                        allow_stub_fallback=False,
+                        train_steps=min(8_000, int(cfg.stage2_train_steps_short)),
+                        eval_episodes=min(20, int(cfg.stage2_eval_episodes)),
+                        device=str(cfg.device),
+                        predict_method=str(cfg.predict_method),
+                        human_num=int(cfg.human_num),
+                        seed=int(cfg.seed),
+                        output_root=os.path.join(cfg.output_dir, "robustness"),
+                        randomization_regime=str(cfg.randomization_regime),
+                    )
+                    robustified.append(attach_robustness_profile(cand, by_pol))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Robustness sweep failed for %s (%s); "
+                        "candidate kept without robustness profile",
+                        cand.candidate_id,
+                        exc,
+                    )
+                    robustified.append(
+                        replace(
+                            cand,
+                            metadata={
+                                **(cand.metadata or {}),
+                                "robustness_error": f"{type(exc).__name__}: {exc}",
+                            },
+                        )
+                    )
             finalists = robustified
             best = pick_best_by_robustness(finalists)
         else:

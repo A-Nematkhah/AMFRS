@@ -1,5 +1,8 @@
 """
 Axis 4 — multi-policy robustness (no adversarial YAML in this milestone).
+
+Real trainer failures do not silently fall back to stub metrics used for
+finalist ranking unless ``allow_stub_fallback=True``.
 """
 
 from __future__ import annotations
@@ -94,6 +97,7 @@ def _run_policy_sweep_real(
     human_num: int = 5,
     seed: int = 425,
     output_root: str = "trained_models/amfrs2_robustness",
+    randomization_regime: str = "without_random",
 ) -> Dict[str, Dict[str, Any]]:
     """
     Short real A2C train+eval per human policy (expensive).
@@ -125,6 +129,7 @@ def _run_policy_sweep_real(
             human_num=int(human_num),
             predict_method=str(predict_method),
             env_name=env_name,
+            randomization_regime=str(randomization_regime),
             output_root=f"{output_root}/{pol}",
             n_eval_seeds=1,
             accept_reject_refine=False,
@@ -158,6 +163,7 @@ def run_policy_sweep(
     policies: Tuple[str, ...] = ("orca", "social_force"),
     *,
     use_stub: bool = True,
+    allow_stub_fallback: bool = False,
     train_steps: int = 8_000,
     eval_episodes: int = 20,
     device: str = "cpu",
@@ -165,9 +171,14 @@ def run_policy_sweep(
     human_num: int = 5,
     seed: int = 425,
     output_root: str = "trained_models/amfrs2_robustness",
+    randomization_regime: str = "without_random",
 ) -> Dict[str, Dict[str, Any]]:
     """
     Evaluate candidate under different ``humans.policy`` settings.
+
+    When ``use_stub`` is False, real failures raise unless
+    ``allow_stub_fallback`` is True (intentionally opt-in; never used to
+    silently rank finalists after a real-trainer crash).
     """
     if use_stub:
         return run_policy_sweep_stub(candidate, policies=policies)
@@ -182,12 +193,18 @@ def run_policy_sweep(
             human_num=human_num,
             seed=seed,
             output_root=output_root,
+            randomization_regime=randomization_regime,
         )
     except Exception as exc:  # noqa: BLE001
+        if not allow_stub_fallback:
+            raise
         logger.warning(
-            "Real policy sweep failed (%s); falling back to stub metrics", exc
+            "Real policy sweep failed (%s); falling back to stub metrics "
+            "(allow_stub_fallback=True)",
+            exc,
         )
         out = run_policy_sweep_stub(candidate, policies=policies)
         for v in out.values():
             v["note"] = f"real_policy_sweep_failed:{type(exc).__name__}"
+            v["stub_fallback"] = True
         return out

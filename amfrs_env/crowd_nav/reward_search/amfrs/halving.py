@@ -60,8 +60,15 @@ class SuccessiveHalvingScheduler:
                 break
             if self.config.max_cost_units is not None and cost_box[0] >= self.config.max_cost_units:
                 break
+            # Skip entire rung if we cannot afford even one evaluation.
+            if (
+                self.config.max_cost_units is not None
+                and cost_box[0] + float(level.cost_units) > self.config.max_cost_units
+            ):
+                break
 
             scored: List[RewardCandidate] = []
+            unevaluated: List[RewardCandidate] = []
             order = list(alive)
             if self.bandit is not None and hasattr(self.bandit, "select_next"):
                 # Optional non-uniform funding order within the rung
@@ -73,13 +80,18 @@ class SuccessiveHalvingScheduler:
                 seen = set(chosen)
                 order.extend([c for c in alive if c.candidate_id not in seen])
 
+            budget_exhausted = False
             for cand in order:
                 if (
                     self.config.max_cost_units is not None
                     and cost_box[0] + float(level.cost_units) > self.config.max_cost_units
-                    and scored
                 ):
-                    break
+                    budget_exhausted = True
+                    unevaluated.append(cand)
+                    continue
+                if budget_exhausted:
+                    unevaluated.append(cand)
+                    continue
                 result = evaluate_at(level, cand)
                 cost_box[0] += float(result.cost)
                 updated = append_fidelity_history(cand, level.name, result)
@@ -88,17 +100,22 @@ class SuccessiveHalvingScheduler:
                     self.bandit.record(cand.candidate_id, float(result.metric), float(result.cost))
                 scored.append(updated)
 
-            if not scored:
+            if not scored and not unevaluated:
+                break
+
+            # Unevaluated arms keep prior-rung scores so they are not dropped silently.
+            pool = scored + unevaluated
+            if not pool:
                 break
 
             # Normalize bandit rewards within rung if supported
-            if self.bandit is not None and hasattr(self.bandit, "normalize_last_rung"):
+            if self.bandit is not None and hasattr(self.bandit, "normalize_last_rung") and scored:
                 metrics = [float(c.score or 0.0) for c in scored]
                 self.bandit.normalize_last_rung(
                     [c.candidate_id for c in scored], metrics
                 )
 
-            scored.sort(
+            pool.sort(
                 key=lambda c: (
                     -(float(c.score) if c.score is not None else float("-inf")),
                     str(c.candidate_id),
@@ -106,11 +123,11 @@ class SuccessiveHalvingScheduler:
             )
             n_keep = max(
                 int(self.config.min_survivors),
-                int(math.ceil(len(scored) / float(eta))),
+                int(math.ceil(len(pool) / float(eta))),
             )
-            n_keep = min(n_keep, len(scored))
+            n_keep = min(n_keep, len(pool))
             # Exact-tie at cutoff: already sorted by candidate_id ascending as secondary key
-            alive = scored[:n_keep]
+            alive = pool[:n_keep]
             if on_rung_complete is not None:
                 on_rung_complete(level.name, list(alive))
 

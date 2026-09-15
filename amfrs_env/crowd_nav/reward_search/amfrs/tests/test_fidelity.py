@@ -63,6 +63,43 @@ def test_halving_promotes_top_fraction():
     assert all(c.metadata.get("fidelity_history") for c in out)
 
 
+def test_slice_after_skips_lower_rungs():
+    ladder = build_default_ladder(use_stub=True, score1_mode="smoke")
+    upper = ladder.slice_after("F1_short_a2c", "F3_full_ppo")
+    names = [lv.name for lv in upper]
+    assert names == ["F2_full_a2c", "F3_full_ppo"]
+
+
+def test_halving_respects_budget_before_first_eval():
+    calls = {"n": 0}
+
+    def make_eval(cost):
+        def _ev(cand):
+            calls["n"] += 1
+            return FidelityResult(metric=1.0, cost=cost, raw_metrics={})
+
+        return _ev
+
+    ladder = FidelityLadder(
+        [
+            FidelityLevel("F0", 1.0, make_eval(1.0)),
+            FidelityLevel("F1", 50.0, make_eval(50.0)),
+        ]
+    )
+    pop = [
+        RewardCandidate(candidate_id="c0", code="x", valid=True, metadata={}),
+        RewardCandidate(candidate_id="c1", code="y", valid=True, metadata={}),
+    ]
+    spent = [0.0]
+    out = SuccessiveHalvingScheduler(
+        ladder, HalvingConfig(eta=2, min_survivors=1, max_cost_units=5.0)
+    ).run(pop, spent_cost=spent)
+    # F0 costs 1+1=2; F1 costs 50 → must not start F1
+    assert calls["n"] == 2
+    assert spent[0] == 2.0
+    assert out  # survivors from F0 retained
+
+
 def test_pipeline_halving_shrinks_population(tmp_path):
     from crowd_nav.reward_search.amfrs import AMFRS2Pipeline, AMFRS2RunConfig
 

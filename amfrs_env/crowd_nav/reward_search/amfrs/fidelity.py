@@ -89,6 +89,26 @@ class FidelityLadder:
         idx = names.index(max_rung_name)
         return FidelityLadder(self._levels[: idx + 1])
 
+    def slice_after(self, after_name: str, up_to_name: str) -> "FidelityLadder":
+        """
+        Return rungs strictly above ``after_name`` through ``up_to_name`` inclusive.
+
+        Used for the post-illumination final climb so candidates are not
+        re-evaluated at F0/F1 after already surviving those rungs.
+        """
+        names = [lv.name for lv in self._levels]
+        if after_name not in names:
+            raise KeyError(after_name)
+        if up_to_name not in names:
+            raise KeyError(up_to_name)
+        i0 = names.index(after_name)
+        i1 = names.index(up_to_name)
+        if i1 <= i0:
+            raise ValueError(
+                f"up_to_name={up_to_name!r} must be above after_name={after_name!r}"
+            )
+        return FidelityLadder(self._levels[i0 + 1 : i1 + 1])
+
 
 def _code_hash(code: str) -> int:
     return int(hashlib.md5((code or "").encode("utf-8")).hexdigest()[:8], 16)

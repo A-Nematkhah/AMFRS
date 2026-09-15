@@ -56,8 +56,11 @@ def main() -> int:
         "--predict-method",
         type=str,
         default=None,
-        choices=["inferred", "none", "const_vel", "truth"],
-        help="Default inferred; --fast forces none. Use none if GST missing.",
+        choices=["inferred", "none"],
+        help=(
+            "Default inferred; --fast forces none. Use none if GST missing. "
+            "Only inferred|none are wired through AMFRS2 trainers/regime."
+        ),
     )
     parser.add_argument(
         "--score1",
@@ -116,11 +119,11 @@ def main() -> int:
     )
 
     # Protect Config.get_args() from our CLI when real trainers parse argv.
-    sys.argv = [
-        sys.argv[0],
-        "--no-cuda" if args.device == "cpu" else "--seed",
-        str(args.seed),
-    ]
+    # Always pass --seed; append --no-cuda only for CPU (never leave a bare int).
+    sanitized = [sys.argv[0], "--seed", str(args.seed)]
+    if args.device == "cpu":
+        sanitized.append("--no-cuda")
+    sys.argv = sanitized
 
     cfg = AMFRS2RunConfig(
         output_dir=args.output_dir,
@@ -138,6 +141,10 @@ def main() -> int:
         cfg.seed = args.seed
     if args.use_stub:
         cfg.use_stub_trainers = True
+        # Stub path must not require the Stage I dataset for F0 unless user
+        # explicitly asks for --score1 dataset (then asset check still applies).
+        if args.score1 is None and not args.fast:
+            cfg.score1_mode = "smoke"
     if args.predict_method is not None and not args.fast:
         cfg.predict_method = args.predict_method
     if args.score1 is not None and not args.fast:

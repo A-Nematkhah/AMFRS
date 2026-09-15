@@ -23,10 +23,14 @@ class AMFRS2RunConfig:
     selection_mode: Literal["map_elites", "scalar"] = "map_elites"
 
     # Axis 1 — fidelity / budget
-    # Cost units are relative (F0=1); see fidelity.build_default_ladder.
-    max_cost_units_per_generation: float = 200.0
+    # Cost units are relative (F0=1, F1=10, F2=40, F3=400); see fidelity.build_default_ladder.
+    # Default must cover illumination through F1 (and leave headroom). Final F3
+    # climb uses ``final_rung_max_cost_units`` (None = uncapped for that phase).
+    max_cost_units_per_generation: float = 500.0
     illumination_max_rung: str = "F1_short_a2c"
     final_rung: str = "F3_full_ppo"
+    # None → no cost cap on the post-illumination final rung climb.
+    final_rung_max_cost_units: Optional[float] = None
     use_bandit: bool = False
     halving_eta: int = 3
     halving_min_survivors: int = 1
