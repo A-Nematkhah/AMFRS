@@ -40,6 +40,16 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=425)
     parser.add_argument("--fast", action="store_true", help="Stub / smoke dry-run profile")
     parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        choices=["short"],
+        help=(
+            "Named budget profile. 'short' ≈ 15–30 min real A2C on one GPU "
+            "(no stub, no full PPO, no robustness sweep)."
+        ),
+    )
+    parser.add_argument(
         "--llm",
         type=str,
         default="seed",
@@ -98,14 +108,20 @@ def main() -> int:
         print(report.format_text())
         return 0 if report.ok else 1
 
+    if args.fast and args.profile:
+        print("Use either --fast or --profile, not both.", file=sys.stderr)
+        return 2
+
+    # --profile short enables seed LLM by design (local short GPU smoke).
+    allow_seed = bool(args.allow_seed_llm or args.profile == "short")
     if (
         not args.fast
         and str(args.llm).strip().lower() == "seed"
-        and not args.allow_seed_llm
+        and not allow_seed
     ):
         print(
             "Refusing non-fast AMFRS with --llm seed. "
-            "Pass a real provider or --allow-seed-llm / --fast.",
+            "Pass a real provider or --allow-seed-llm / --fast / --profile short.",
             file=sys.stderr,
         )
         return 2
@@ -127,7 +143,7 @@ def main() -> int:
         seed=args.seed,
         llm_provider=args.llm,
         device=args.device,
-        allow_seed_llm=bool(args.allow_seed_llm),
+        allow_seed_llm=allow_seed,
         stage1_dataset_path=args.stage1_dataset,
         randomization_regime=args.regime,
         num_processes=args.num_processes,
@@ -136,6 +152,13 @@ def main() -> int:
         cfg.apply_fast_profile()
         cfg.output_dir = args.output_dir
         cfg.seed = args.seed
+    if args.profile == "short":
+        cfg.apply_short_gpu_profile()
+        cfg.output_dir = args.output_dir
+        cfg.seed = args.seed
+        cfg.device = args.device
+        cfg.llm_provider = args.llm
+        cfg.allow_seed_llm = True
     if args.use_stub:
         cfg.use_stub_trainers = True
         if args.score1 is None and not args.fast:
@@ -156,6 +179,8 @@ def main() -> int:
         cfg.stage2_train_steps_short = int(args.stage2_train_steps_short)
     if args.stage3_train_steps is not None:
         cfg.stage3_train_steps = int(args.stage3_train_steps)
+    if args.num_processes is not None:
+        cfg.num_processes = int(args.num_processes)
 
     try:
         artifacts = AMFRSPipeline(cfg).run()
@@ -168,6 +193,7 @@ def main() -> int:
         f"rejected={len(artifacts.rejected)} "
         f"best={artifacts.best.candidate_id if artifacts.best else None} "
         f"stub={cfg.use_stub_trainers or cfg.fast} "
+        f"profile={args.profile or ('fast' if args.fast else 'default')} "
         f"-> {cfg.output_dir}"
     )
     return 0

@@ -13,8 +13,10 @@ Episode memory contract (option a — function-only stateful rewards):
 from __future__ import annotations
 
 import ast
+import logging
 import math
 import threading
+import types
 from typing import Any, Callable, Dict, Optional, Sequence
 
 from crowd_nav.reward_search.sandbox.config import SandboxConfig
@@ -27,6 +29,8 @@ from crowd_nav.reward_search.state import (
 )
 
 ComputeFn = Callable[[RewardState, Dict[str, Any]], float]
+
+logger = logging.getLogger(__name__)
 
 _SAFE_BUILTINS = {
     "abs": abs,
@@ -70,6 +74,72 @@ def require_finite_float(value: object) -> float:
     return number
 
 
+# Soft penalty when a live rollout hits NaN/Inf (keeps vecenv workers alive).
+NONFINITE_ROLLOUT_PENALTY = -1.0e6
+
+
+def _sandbox_math_module() -> types.SimpleNamespace:
+    """Inject math helpers without math.inf / math.nan (AST + return checks also ban them)."""
+    allowed: Dict[str, Any] = {}
+    for name in dir(math):
+        if name.startswith("_") or name in {"inf", "nan"}:
+            continue
+        allowed[name] = getattr(math, name)
+    return types.SimpleNamespace(**allowed)
+
+
+def _finite_float(value: object, fallback: float) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float(fallback)
+    return number if math.isfinite(number) else float(fallback)
+
+
+def sanitize_reward_state(state: RewardState) -> RewardState:
+    """
+    Ensure every numeric field the candidate may read is finite.
+
+    Guards against env quirks (e.g. CrowdSim dmin=+inf before a distance is
+    recorded) so LLM/primitives never see non-finite inputs.
+    """
+    robot = state.robot
+    safe_robot = RobotRewardState(
+        px=_finite_float(robot.px, 0.0),
+        py=_finite_float(robot.py, 0.0),
+        vx=_finite_float(robot.vx, 0.0),
+        vy=_finite_float(robot.vy, 0.0),
+        radius=_finite_float(robot.radius, 0.3),
+        gx=_finite_float(robot.gx, 0.0),
+        gy=_finite_float(robot.gy, 0.0),
+        v_pref=_finite_float(robot.v_pref, 1.0),
+    )
+    safe_humans = tuple(
+        HumanObservable(
+            px=_finite_float(h.px, 0.0),
+            py=_finite_float(h.py, 0.0),
+            vx=_finite_float(h.vx, 0.0),
+            vy=_finite_float(h.vy, 0.0),
+            radius=_finite_float(h.radius, 0.3),
+        )
+        for h in state.humans
+    )
+    dmin_fallback = -1.0e-3 if state.collision else 15.0
+    return RewardState(
+        robot=safe_robot,
+        humans=safe_humans,
+        dmin=_finite_float(state.dmin, dmin_fallback),
+        discomfort_dist=_finite_float(state.discomfort_dist, 0.25),
+        collision=bool(state.collision),
+        reaching_goal=bool(state.reaching_goal),
+        timeout=bool(state.timeout),
+        action=state.action,
+        time_step=_finite_float(state.time_step, 0.25),
+        global_time=_finite_float(state.global_time, 0.0),
+        time_limit=_finite_float(state.time_limit, 25.0),
+    )
+
+
 def _strip_import_nodes(tree: ast.AST) -> ast.AST:
     """Remove every Import/ImportFrom anywhere in the tree (math is injected)."""
 
@@ -97,7 +167,7 @@ def compile_compute_reward(code: str, config: SandboxConfig) -> ComputeFn:
     """
     namespace = {"__builtins__": dict(_SAFE_BUILTINS)}
     if "math" in config.allowed_modules:
-        namespace["math"] = math
+        namespace["math"] = _sandbox_math_module()
     extra = getattr(config, "extra_namespace", None) or {}
     if extra:
         for key, value in dict(extra).items():
@@ -262,20 +332,42 @@ class SandboxedReward(RewardFunction):
         self._config = config
         self._source_code = source_code
         self._memory: Dict[str, Any] = {}
+        self._nonfinite_hits = 0
+        # False for Score1/static analysis (raise). True for RL rollouts (clamp).
+        self._soft_nonfinite = False
+
+    def set_soft_nonfinite(self, enabled: bool) -> None:
+        """Enable soft clamp of NaN/Inf during live env rollouts."""
+        self._soft_nonfinite = bool(enabled)
 
     def reset(self) -> None:
         self._memory.clear()
 
     def compute(self, state: RewardState) -> float:
+        safe_state = sanitize_reward_state(state)
         try:
-            value = self._compute_fn(state, self._memory)
+            value = self._compute_fn(safe_state, self._memory)
         except RewardSandboxError:
             raise
         except Exception as exc:
             raise RewardSandboxError(
                 f"runtime error in sandboxed compute(): {type(exc).__name__}: {exc}"
             ) from exc
-        return require_finite_float(value)
+        try:
+            return require_finite_float(value)
+        except RewardSandboxError:
+            if not self._soft_nonfinite:
+                raise
+            # Soft-fail in rollout: keep ShmemVecEnv workers alive on Windows.
+            self._nonfinite_hits += 1
+            if self._nonfinite_hits <= 3:
+                logger.warning(
+                    "compute_reward non-finite (%r); using penalty %.0e (hit #%s)",
+                    value,
+                    NONFINITE_ROLLOUT_PENALTY,
+                    self._nonfinite_hits,
+                )
+            return float(NONFINITE_ROLLOUT_PENALTY)
 
     def __getstate__(self) -> Dict[str, Any]:
         if not self._source_code:
@@ -286,10 +378,13 @@ class SandboxedReward(RewardFunction):
         return {
             "config": self._config,
             "source_code": self._source_code,
+            "soft_nonfinite": bool(self._soft_nonfinite),
         }
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self._config = state["config"]
         self._source_code = state["source_code"]
+        self._soft_nonfinite = bool(state.get("soft_nonfinite", False))
         self._memory = {}
+        self._nonfinite_hits = 0
         self._compute_fn = compile_compute_reward(self._source_code, self._config)

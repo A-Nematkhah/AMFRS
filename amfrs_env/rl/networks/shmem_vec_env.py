@@ -91,15 +91,41 @@ class ShmemVecEnv(VecEnv):
         return np.array(outs)
 
     def close_extras(self):
+        # If a worker died mid-step, step_wait() blocks forever on Windows.
         if self.waiting_step:
-            self.step_wait()
+            self.waiting_step = False
+            for pipe in self.parent_pipes:
+                try:
+                    if pipe.poll(0.05):
+                        pipe.recv()
+                except Exception:  # noqa: BLE001
+                    pass
         for pipe in self.parent_pipes:
-            pipe.send(('close', None))
+            try:
+                pipe.send(('close', None))
+            except Exception:  # noqa: BLE001
+                pass
         for pipe in self.parent_pipes:
-            pipe.recv()
-            pipe.close()
+            try:
+                if pipe.poll(1.0):
+                    pipe.recv()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                pipe.close()
+            except Exception:  # noqa: BLE001
+                pass
         for proc in self.procs:
-            proc.join()
+            try:
+                proc.join(timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pass
+            if proc.is_alive():
+                try:
+                    proc.terminate()
+                    proc.join(timeout=1.0)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def get_images(self, mode='human'):
         for pipe in self.parent_pipes:

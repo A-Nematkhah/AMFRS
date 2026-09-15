@@ -263,28 +263,43 @@ def score1_report(
     all_steps: List[float] = []
     scenario_means: List[float] = []
     per_scenario: Dict[str, float] = {}
-    for sid, trajs in dataset.items():
-        usable = [t for t in trajs if t.length >= 1]
-        if len(usable) < 2:
-            continue
-        frame_corrs = _scenario_frame_correlations(
-            usable,
-            reward_fn,
-            mask_pads=opts.mask_pads,
-            step_out=all_steps if opts.anti_exploit else None,
-        )
-        if not frame_corrs:
-            continue
-        mean_rho = float(np.mean(frame_corrs))
-        scenario_means.append(mean_rho)
-        per_scenario[str(sid)] = mean_rho
-
     opt_dict = {
         "mask_pads": opts.mask_pads,
         "anti_exploit": opts.anti_exploit,
         "min_step_std": opts.min_step_std,
         "max_abs_step": opts.max_abs_step,
     }
+    try:
+        for sid, trajs in dataset.items():
+            usable = [t for t in trajs if t.length >= 1]
+            if len(usable) < 2:
+                continue
+            frame_corrs = _scenario_frame_correlations(
+                usable,
+                reward_fn,
+                mask_pads=opts.mask_pads,
+                step_out=all_steps if opts.anti_exploit else None,
+            )
+            if not frame_corrs:
+                continue
+            mean_rho = float(np.mean(frame_corrs))
+            scenario_means.append(mean_rho)
+            per_scenario[str(sid)] = mean_rho
+    except Exception as exc:  # noqa: BLE001 — sandbox non-finite / runtime
+        from crowd_nav.reward_search.sandbox.errors import RewardSandboxError
+
+        if isinstance(exc, RewardSandboxError) or "non-finite" in str(exc).lower():
+            return Score1Report(
+                score=float("-inf"),
+                n_scenarios_scored=0,
+                n_scenarios_total=len(dataset),
+                anti_exploit_triggered=True,
+                anti_exploit_reason=f"runtime_non_finite:{type(exc).__name__}",
+                mask_pads=opts.mask_pads,
+                options=opt_dict,
+                per_scenario={},
+            )
+        raise
 
     if not scenario_means:
         # Degenerate streams can yield no finite Spearman frames; still apply

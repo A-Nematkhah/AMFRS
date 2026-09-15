@@ -115,6 +115,19 @@ class SuccessiveHalvingScheduler:
                     [c.candidate_id for c in scored], metrics
                 )
 
+            # Drop arms already dead at prior rung — do not spend F1+/budget on -inf.
+            # Keep score=None (unevaluated under budget) so they are not silently lost.
+            finite_pool = [
+                c
+                for c in pool
+                if c.score is None or math.isfinite(float(c.score))
+            ]
+            if not finite_pool:
+                if on_rung_complete is not None:
+                    on_rung_complete(level.name, [])
+                return []
+            pool = finite_pool
+
             pool.sort(
                 key=lambda c: (
                     -(float(c.score) if c.score is not None else float("-inf")),

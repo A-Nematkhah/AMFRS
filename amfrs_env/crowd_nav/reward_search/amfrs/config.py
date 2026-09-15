@@ -58,6 +58,8 @@ class AMFRSRunConfig:
     memory_db_path: str = "data/reward_memory.sqlite"
     use_retrieval_memory: bool = True
     use_ensemble_critique: bool = False
+    # Retries when sandbox/static-gate rejects a proposal (fill to population_size).
+    max_invalid_replacements: int = 24
 
     # Axis 4 — robustness (finalists only)
     run_robustness_sweep: bool = True
@@ -101,6 +103,35 @@ class AMFRSRunConfig:
         self.llm_provider = "seed"
         self.llm_provider_b = "seed"
         self.static_gate_n_states = 32
+
+    def apply_short_gpu_profile(self) -> None:
+        """
+        Real trainers, aimed at ~15–30 min on one GPU (order-of-magnitude).
+
+        Skips full PPO (stops at F2 A2C) and robustness sweep; fewer humans
+        and smaller pop/gen. Timing varies with GPU and GST on/off.
+        """
+        self.fast = False
+        self.use_stub_trainers = False
+        self.population_size = 4
+        self.generations = 1
+        self.score1_mode = "dataset"
+        self.stage2_train_steps = 8_000
+        self.stage2_train_steps_short = 2_000
+        self.stage2_eval_episodes = 20
+        self.stage3_train_steps = 15_000
+        self.stage3_eval_episodes = 30
+        self.max_cost_units_per_generation = 200.0
+        self.illumination_max_rung = "F1_short_a2c"
+        self.final_rung = "F2_full_a2c"
+        self.run_robustness_sweep = False
+        self.predict_method = "none"
+        self.human_num = 5
+        self.num_processes = 4
+        self.device = "cuda"
+        self.allow_seed_llm = True
+        self.llm_provider = "seed"
+        self.llm_provider_b = "seed"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

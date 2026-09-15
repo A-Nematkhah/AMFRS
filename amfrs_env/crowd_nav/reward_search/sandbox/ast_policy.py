@@ -89,11 +89,42 @@ class _PolicyVisitor(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr.startswith("_"):
             self.reasons.append(f"attribute {node.attr!r} is forbidden")
+        # Ban math.inf / float-style Infinity names even if math is injected.
+        if node.attr.lower() in {"inf", "nan", "infinity"}:
+            self.reasons.append(
+                f"non-finite constant {node.attr!r} is forbidden "
+                "(return only finite floats)"
+            )
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in self.config.forbidden_names or node.id.startswith("__"):
             self.reasons.append(f"name {node.id!r} is forbidden")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        # Reject float('inf') / float('nan') / float('Infinity').
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "float"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            token = node.args[0].value.strip().lower()
+            if token in {
+                "inf",
+                "+inf",
+                "-inf",
+                "infinity",
+                "+infinity",
+                "-infinity",
+                "nan",
+            }:
+                self.reasons.append(
+                    f"float({node.args[0].value!r}) is forbidden "
+                    "(return only finite floats)"
+                )
         self.generic_visit(node)
 
 

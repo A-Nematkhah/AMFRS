@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -222,6 +223,79 @@ def _env_name_for_predict(predict_method: str) -> str:
     )
 
 
+def _failed_train_result(
+    candidate: RewardCandidate,
+    *,
+    cost: float,
+    rung: str,
+    exc: BaseException,
+) -> FidelityResult:
+    """Eliminate a candidate when real train/eval crashes (e.g. LLM reward → -inf)."""
+    logger.warning(
+        "Real train failed for %s at %s (%s: %s); metric=-inf",
+        candidate.candidate_id,
+        rung,
+        type(exc).__name__,
+        exc,
+    )
+    raw = {
+        "SR": 0.0,
+        "CR": 1.0,
+        "TR": 0.0,
+        "NT": 0.0,
+        "PL": 0.0,
+        "ITR": 0.0,
+        "SD": 0.0,
+        "goal_dist0": 1.0,
+        "error": f"{type(exc).__name__}: {exc}",
+        "trainer": "failed",
+        "rung": rung,
+    }
+    return FidelityResult(metric=float("-inf"), cost=cost, raw_metrics=raw)
+
+
+def _prior_metric_is_non_finite(candidate: RewardCandidate) -> bool:
+    """True when a previous rung already marked this candidate as dead (-inf/NaN)."""
+    if candidate.score is not None and not math.isfinite(float(candidate.score)):
+        return True
+    last = (candidate.metadata or {}).get("last_metric")
+    if last is not None:
+        try:
+            if not math.isfinite(float(last)):
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def _skipped_prior_fail_result(
+    candidate: RewardCandidate, *, cost: float, rung: str
+) -> FidelityResult:
+    logger.info(
+        "Skip real train for %s at %s (prior metric non-finite)",
+        candidate.candidate_id,
+        rung,
+    )
+    return FidelityResult(
+        metric=float("-inf"),
+        cost=0.0,
+        raw_metrics={
+            "SR": 0.0,
+            "CR": 1.0,
+            "TR": 0.0,
+            "NT": 0.0,
+            "PL": 0.0,
+            "ITR": 0.0,
+            "SD": 0.0,
+            "goal_dist0": 1.0,
+            "skipped": "prior_rung_non_finite",
+            "trainer": "skipped",
+            "rung": rung,
+            "prior_score": candidate.score,
+        },
+    )
+
+
 def _evaluate_real_stage2(
     candidate: RewardCandidate,
     *,
@@ -230,6 +304,10 @@ def _evaluate_real_stage2(
     ctx: TrainerContext,
 ) -> FidelityResult:
     from crowd_nav.reward_search.stage2 import RealPolicyTrainer, Stage2Config
+
+    rung = "F1_short_a2c" if short else "F2_full_a2c"
+    if _prior_metric_is_non_finite(candidate):
+        return _skipped_prior_fail_result(candidate, cost=cost, rung=rung)
 
     steps = (
         int(ctx.stage2_train_steps_short) if short else int(ctx.stage2_train_steps)
@@ -255,12 +333,15 @@ def _evaluate_real_stage2(
         cfg.predict_method,
         cfg.device,
     )
-    metrics = RealPolicyTrainer().train_and_eval(
-        candidate, round_index=0, config=cfg
-    )
+    try:
+        metrics = RealPolicyTrainer().train_and_eval(
+            candidate, round_index=0, config=cfg
+        )
+    except Exception as exc:  # noqa: BLE001 — worker EOF / sandbox -inf must not kill search
+        return _failed_train_result(candidate, cost=cost, rung=rung, exc=exc)
     raw = _attach_goal_dist0(metrics.as_dict())
     raw["trainer"] = "RealPolicyTrainer"
-    raw["rung"] = "F1_short_a2c" if short else "F2_full_a2c"
+    raw["rung"] = rung
     return FidelityResult(
         metric=float(navigation_scalar_from_dict(raw)),
         cost=cost,
@@ -275,6 +356,9 @@ def _evaluate_real_stage3(
     ctx: TrainerContext,
 ) -> FidelityResult:
     from crowd_nav.reward_search.stage3 import RealPolicyTrainer, Stage3Config
+
+    if _prior_metric_is_non_finite(candidate):
+        return _skipped_prior_fail_result(candidate, cost=cost, rung="F3_full_ppo")
 
     cfg = Stage3Config(
         train_env_steps=int(ctx.stage3_train_steps),
@@ -296,9 +380,12 @@ def _evaluate_real_stage3(
         cfg.predict_method,
         cfg.device,
     )
-    bundle = RealPolicyTrainer().train_and_eval(
-        candidate, round_index=0, config=cfg
-    )
+    try:
+        bundle = RealPolicyTrainer().train_and_eval(
+            candidate, round_index=0, config=cfg
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _failed_train_result(candidate, cost=cost, rung="F3_full_ppo", exc=exc)
     metrics = bundle.metrics
     raw = _attach_goal_dist0(metrics.as_dict())
     raw["trainer"] = "RealPolicyTrainer"

@@ -8,6 +8,7 @@ RewardState (crowd humans + Rsense) instead of RewardContext.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
@@ -219,6 +220,15 @@ def build_reward_state(
 ) -> RewardState:
     """Assemble RewardState from env + already-computed detection locals."""
     robot = env.robot
+    dmin_f = float(dmin)
+    # CrowdSim initializes dmin=+inf and may break on first collision before
+    # recording a finite closest_dist. Reward code must never see non-finite dmin.
+    if not math.isfinite(dmin_f):
+        if collision:
+            dmin_f = -1.0e-3
+        else:
+            sensor = float(getattr(robot, "sensor_range", 0.0) or 0.0)
+            dmin_f = sensor if sensor > 0.0 else 15.0
     return RewardState(
         robot=RobotRewardState(
             px=float(robot.px),
@@ -231,7 +241,7 @@ def build_reward_state(
             v_pref=float(robot.v_pref),
         ),
         humans=humans_within_rsense(robot, env.humans, robot.sensor_range),
-        dmin=float(dmin),
+        dmin=dmin_f,
         discomfort_dist=float(env.discomfort_dist),
         collision=bool(collision),
         reaching_goal=bool(reaching_goal),

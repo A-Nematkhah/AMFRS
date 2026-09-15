@@ -4,11 +4,17 @@ Axis 3 — reward primitive registry (pure functions over RewardState).
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict
 
 from crowd_nav.reward_search.state import RewardState
 
 Primitive = Callable[[RewardState, Dict[str, Any]], float]
+
+
+def _finite_or(value: float, fallback: float) -> float:
+    v = float(value)
+    return v if math.isfinite(v) else float(fallback)
 
 
 def goal_progress(state: RewardState, memory: Dict[str, Any]) -> float:
@@ -20,16 +26,17 @@ def goal_progress(state: RewardState, memory: Dict[str, Any]) -> float:
     memory["prev_dist"] = dist
     if prev is None:
         return 0.0
-    return float(prev) - float(dist)
+    return _finite_or(float(prev) - float(dist), 0.0)
 
 
 def discomfort_penalty(state: RewardState, memory: Dict[str, Any]) -> float:
     """0 outside discomfort_dist; linearly increasing as dmin -> 0 inside it."""
     _ = memory
     d = float(state.discomfort_dist)
-    if state.dmin >= d:
+    dmin = _finite_or(state.dmin, d + 1.0)
+    if dmin >= d:
         return 0.0
-    return float(d - state.dmin)
+    return float(d - dmin)
 
 
 def collision_indicator(state: RewardState, memory: Dict[str, Any]) -> float:
@@ -55,7 +62,9 @@ def jerk_penalty(state: RewardState, memory: Dict[str, Any]) -> float:
     memory["prev_action"] = (ax, ay)
     if prev is None:
         return 0.0
-    return float(((ax - float(prev[0])) ** 2 + (ay - float(prev[1])) ** 2) ** 0.5)
+    return _finite_or(
+        ((ax - float(prev[0])) ** 2 + (ay - float(prev[1])) ** 2) ** 0.5, 0.0
+    )
 
 
 def goal_alignment_bonus(state: RewardState, memory: Dict[str, Any]) -> float:
@@ -68,12 +77,15 @@ def goal_alignment_bonus(state: RewardState, memory: Dict[str, Any]) -> float:
     speed = (state.robot.vx ** 2 + state.robot.vy ** 2) ** 0.5
     if speed < 1e-8:
         return 0.0
-    return float((state.robot.vx * dx + state.robot.vy * dy) / (speed * dist))
+    return _finite_or(
+        (state.robot.vx * dx + state.robot.vy * dy) / (speed * dist), 0.0
+    )
 
 
 def min_distance_margin(state: RewardState, memory: Dict[str, Any]) -> float:
+    """Closest human clearance; never returns ±inf (env may leave dmin=+inf)."""
     _ = memory
-    return float(state.dmin)
+    return _finite_or(state.dmin, 15.0)
 
 
 def success_indicator(state: RewardState, memory: Dict[str, Any]) -> float:
@@ -92,19 +104,19 @@ def backing_up_penalty(state: RewardState, memory: Dict[str, Any]) -> float:
     dy = state.robot.gy - state.robot.py
     # Negative radial speed toward goal
     radial = state.robot.vx * dx + state.robot.vy * dy
-    return float(max(0.0, -radial))
+    return _finite_or(max(0.0, -radial), 0.0)
 
 
 def spin_penalty(state: RewardState, memory: Dict[str, Any]) -> float:
     _ = memory
     speed = (state.robot.vx ** 2 + state.robot.vy ** 2) ** 0.5
     # High angular-ish change relative to preferred speed without progress
-    return float(max(0.0, speed - state.robot.v_pref))
+    return _finite_or(max(0.0, speed - state.robot.v_pref), 0.0)
 
 
 def energy_penalty(state: RewardState, memory: Dict[str, Any]) -> float:
     _ = memory
-    return float(state.robot.vx ** 2 + state.robot.vy ** 2)
+    return _finite_or(state.robot.vx ** 2 + state.robot.vy ** 2, 0.0)
 
 
 def heading_alignment(state: RewardState, memory: Dict[str, Any]) -> float:
@@ -122,7 +134,7 @@ def social_force_alignment(state: RewardState, memory: Dict[str, Any]) -> float:
     dist = (dx * dx + dy * dy) ** 0.5
     if dist < 1e-8:
         return 0.0
-    return float((state.robot.vx * dx + state.robot.vy * dy) / dist)
+    return _finite_or((state.robot.vx * dx + state.robot.vy * dy) / dist, 0.0)
 
 
 PRIMITIVE_REGISTRY: Dict[str, Primitive] = {

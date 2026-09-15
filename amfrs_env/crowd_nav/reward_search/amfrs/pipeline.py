@@ -157,34 +157,212 @@ class AMFRSPipeline:
         entries = self.memory.query_similar(code, k=3)
         return build_memory_block(entries)
 
-    def _generate_initial_population(self) -> List[RewardCandidate]:
-        cfg = self.config
-        out: List[RewardCandidate] = []
-        seed_code = D5_SEED_FUNCTION.strip() + "\n"
-        # Always include D5 seed
-        c0 = self._validate_and_gate(seed_code, "seed_0", "initial")
-        if c0 is not None:
-            out.append(c0)
+    def _append_reject(
+        self,
+        rejected: List[Dict[str, Any]],
+        cand: Optional[RewardCandidate],
+        *,
+        reason: str,
+        attempt: int,
+    ) -> None:
+        rejected.append(
+            {
+                "candidate_id": cand.candidate_id if cand is not None else f"attempt_{attempt}",
+                "reason": reason
+                if cand is None
+                else (cand.validation_error or reason),
+                "static_report": (cand.metadata or {}).get("static_report")
+                if cand is not None
+                else None,
+                "attempt": int(attempt),
+            }
+        )
 
-        # Fill via LLM or deterministic numeric variants in fast/seed mode
-        for i in range(1, cfg.population_size):
-            cid = f"seed_{i}"
-            if cfg.fast or cfg.llm_provider == "seed":
-                code = (
-                    "def compute_reward(state, memory):\n"
-                    f"    g = goal_progress(state, memory)\n"
-                    f"    c = collision_indicator(state, memory)\n"
-                    f"    d = discomfort_penalty(state, memory)\n"
-                    f"    return float({1.0 + 0.1 * i} * g - 20.0 * c - {0.5 + 0.1 * i} * d)\n"
+    def _is_executable(self, cand: Optional[RewardCandidate]) -> bool:
+        return cand is not None and bool(cand.valid) and cand.reward_fn is not None
+
+    def _propose_initial_code(self, slot: int, attempt: int) -> str:
+        """slot is the target index in [0, N); attempt counts retries for that slot."""
+        cfg = self.config
+        if slot == 0 and attempt == 0:
+            return D5_SEED_FUNCTION.strip() + "\n"
+        if cfg.fast or cfg.llm_provider == "seed":
+            # Vary coefficients so retries are distinct genomes.
+            i = slot + attempt * max(1, cfg.population_size)
+            return (
+                "def compute_reward(state, memory):\n"
+                f"    g = goal_progress(state, memory)\n"
+                f"    c = collision_indicator(state, memory)\n"
+                f"    d = discomfort_penalty(state, memory)\n"
+                f"    return float({1.0 + 0.1 * i} * g - 20.0 * c - {0.5 + 0.1 * i} * d)\n"
+            )
+        seed_code = D5_SEED_FUNCTION.strip() + "\n"
+        prompt = build_initial_prompt(memory_block=self._memory_block_for(seed_code))
+        raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
+        return normalize_to_compute_reward(extract_python_code(raw) or raw)
+
+    def _generate_initial_population(
+        self, rejected: List[Dict[str, Any]]
+    ) -> List[RewardCandidate]:
+        """
+        Fill exactly ``population_size`` *valid* candidates.
+
+        Invalid sandbox/static-gate outputs are logged and replaced until the
+        budget ``population_size * max_invalid_replacements`` is exhausted.
+        """
+        cfg = self.config
+        n = max(1, int(cfg.population_size))
+        max_attempts = n * max(1, int(cfg.max_invalid_replacements))
+        out: List[RewardCandidate] = []
+        attempt = 0
+        while len(out) < n and attempt < max_attempts:
+            slot = len(out)
+            retry_for_slot = 0
+            while len(out) == slot and attempt < max_attempts:
+                cid = (
+                    f"seed_{slot}"
+                    if retry_for_slot == 0
+                    else f"seed_{slot}_r{retry_for_slot}"
                 )
-            else:
-                prompt = build_initial_prompt(memory_block=self._memory_block_for(seed_code))
-                raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
-                code = normalize_to_compute_reward(extract_python_code(raw) or raw)
-            cand = self._validate_and_gate(code, cid, "initial")
-            if cand is not None:
-                out.append(cand)
+                code = self._propose_initial_code(slot, retry_for_slot)
+                cand = self._validate_and_gate(code, cid, "initial")
+                attempt += 1
+                if self._is_executable(cand):
+                    assert cand is not None
+                    out.append(cand)
+                    break
+                self._append_reject(
+                    rejected,
+                    cand,
+                    reason="invalid_initial",
+                    attempt=attempt,
+                )
+                retry_for_slot += 1
+                logger.info(
+                    "Initial slot %s rejected (%s); have %s/%s valid",
+                    slot,
+                    cand.validation_error if cand else "None",
+                    len(out),
+                    n,
+                )
+        if len(out) < n:
+            logger.warning(
+                "Could only fill %s/%s valid initial candidates after %s attempts",
+                len(out),
+                n,
+                attempt,
+            )
         return out
+
+    def _propose_mutation_code(self, parent: RewardCandidate, slot: int, retry: int) -> str:
+        cfg = self.config
+        if cfg.fast or cfg.llm_provider == "seed":
+            i = slot + retry * 17
+            return (
+                "def compute_reward(state, memory):\n"
+                f"    g = goal_progress(state, memory)\n"
+                f"    c = collision_indicator(state, memory)\n"
+                f"    d = discomfort_penalty(state, memory)\n"
+                f"    return float({1.5 + 0.05 * i} * g - {18.0 + (i % 7)} * c - d)\n"
+            )
+        mem = self._memory_block_for(parent.code)
+        prompt = build_mutation_prompt(parent, memory_block=mem)
+        raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
+        return normalize_to_compute_reward(extract_python_code(raw) or raw)
+
+    def _propose_children(
+        self,
+        parents: Sequence[RewardCandidate],
+        gen: int,
+        rejected: List[Dict[str, Any]],
+    ) -> List[RewardCandidate]:
+        """Propose exactly ``population_size`` valid children (refill on reject)."""
+        cfg = self.config
+        if not parents:
+            return []
+        n = max(1, int(cfg.population_size))
+        max_attempts = n * max(1, int(cfg.max_invalid_replacements))
+        parent_list = list(parents)
+        children: List[RewardCandidate] = []
+        attempt = 0
+        while len(children) < n and attempt < max_attempts:
+            slot = len(children)
+            parent = parent_list[slot % len(parent_list)]
+            # Last slot: prefer crossover when >=2 parents (once), else mutate
+            use_xover = (
+                slot == n - 1
+                and len(parent_list) >= 2
+                and not any(c.origin == "crossover" for c in children)
+            )
+            retry = 0
+            filled = False
+            while not filled and attempt < max_attempts:
+                if use_xover:
+                    cid = f"g{gen}_x{slot}" if retry == 0 else f"g{gen}_x{slot}_r{retry}"
+                    if cfg.fast or cfg.llm_provider == "seed":
+                        code = (
+                            "def compute_reward(state, memory):\n"
+                            "    return float("
+                            f"{2.0 + 0.05 * retry} * goal_progress(state, memory) "
+                            "- 20.0 * collision_indicator(state, memory) "
+                            "- discomfort_penalty(state, memory))\n"
+                        )
+                    else:
+                        a, b = parent_list[0], parent_list[1]
+                        prompt = build_semantic_crossover_prompt(
+                            a,
+                            b,
+                            memory_block=self._memory_block_for(a.code),
+                        )
+                        raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
+                        code = normalize_to_compute_reward(extract_python_code(raw) or raw)
+                    origin = "crossover"
+                else:
+                    cid = f"g{gen}_m{slot}" if retry == 0 else f"g{gen}_m{slot}_r{retry}"
+                    code = self._propose_mutation_code(parent, slot, retry)
+                    origin = "mutation"
+                cand = self._validate_and_gate(code, cid, origin)
+                attempt += 1
+                if not self._is_executable(cand):
+                    self._append_reject(
+                        rejected, cand, reason=f"invalid_{origin}", attempt=attempt
+                    )
+                    retry += 1
+                    continue
+                assert cand is not None
+                if cfg.use_ensemble_critique and not cfg.fast:
+                    diag = str((parent.metadata or {}).get("last_metric", ""))
+                    report = critique_agrees(cand, diag, self.llm_a, self.llm_b)
+                    cand = replace(
+                        cand,
+                        metadata={
+                            **(cand.metadata or {}),
+                            "ensemble_critique": {
+                                "agreed": report.agreed,
+                                "shared_terms": report.shared_terms,
+                            },
+                        },
+                    )
+                    if not report.agreed:
+                        self._append_reject(
+                            rejected,
+                            cand,
+                            reason="ensemble_critique_disagree",
+                            attempt=attempt,
+                        )
+                        retry += 1
+                        continue
+                children.append(cand)
+                filled = True
+        if len(children) < n:
+            logger.warning(
+                "Could only fill %s/%s valid children for gen=%s after %s attempts",
+                len(children),
+                n,
+                gen,
+                attempt,
+            )
+        return children
 
     def _on_rung_complete(self, level_name: str, survivors: List[RewardCandidate]) -> None:
         active = self._active_spent if self._active_spent is not None else self._spent
@@ -296,72 +474,6 @@ class AMFRSPipeline:
             bandit=bandit,
         )
 
-    def _propose_children(self, parents: Sequence[RewardCandidate], gen: int) -> List[RewardCandidate]:
-        cfg = self.config
-        if not parents:
-            return []
-        children: List[RewardCandidate] = []
-        # Mutate each elite (or scalar top parents)
-        for i, parent in enumerate(list(parents)[: cfg.population_size]):
-            cid = f"g{gen}_m{i}"
-            mem = self._memory_block_for(parent.code)
-            if cfg.fast or cfg.llm_provider == "seed":
-                code = (
-                    "def compute_reward(state, memory):\n"
-                    f"    g = goal_progress(state, memory)\n"
-                    f"    c = collision_indicator(state, memory)\n"
-                    f"    d = discomfort_penalty(state, memory)\n"
-                    f"    return float({1.5 + 0.05 * i} * g - {18.0 + i} * c - d)\n"
-                )
-            else:
-                prompt = build_mutation_prompt(parent, memory_block=mem)
-                raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
-                code = normalize_to_compute_reward(extract_python_code(raw) or raw)
-            cand = self._validate_and_gate(code, cid, "mutation")
-            if cand is not None and cand.valid:
-                if cfg.use_ensemble_critique and not cfg.fast:
-                    diag = str((parent.metadata or {}).get("last_metric", ""))
-                    report = critique_agrees(cand, diag, self.llm_a, self.llm_b)
-                    cand = replace(
-                        cand,
-                        metadata={
-                            **(cand.metadata or {}),
-                            "ensemble_critique": {
-                                "agreed": report.agreed,
-                                "shared_terms": report.shared_terms,
-                            },
-                        },
-                    )
-                    if not report.agreed:
-                        # Keep parent unchanged (skip child)
-                        continue
-                children.append(cand)
-
-        # One semantic crossover if >=2 parents
-        if len(parents) >= 2:
-            a, b = parents[0], parents[1]
-            cid = f"g{gen}_x0"
-            if cfg.fast or cfg.llm_provider == "seed":
-                code = (
-                    "def compute_reward(state, memory):\n"
-                    "    return float("
-                    "2.0 * goal_progress(state, memory) "
-                    "- 20.0 * collision_indicator(state, memory) "
-                    "- discomfort_penalty(state, memory))\n"
-                )
-            else:
-                prompt = build_semantic_crossover_prompt(
-                    a,
-                    b,
-                    memory_block=self._memory_block_for(a.code),
-                )
-                raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
-                code = normalize_to_compute_reward(extract_python_code(raw) or raw)
-            xc = self._validate_and_gate(code, cid, "crossover")
-            if xc is not None and xc.valid:
-                children.append(xc)
-        return children
-
     def run(self) -> AMFRSArtifacts:
         cfg = self.config
         os.makedirs(cfg.output_dir, exist_ok=True)
@@ -376,20 +488,15 @@ class AMFRSPipeline:
         )
         logger.info("Assets:\n%s", asset_report.format_text())
 
-        seed_candidates = self._generate_initial_population()
         rejected: List[Dict[str, Any]] = []
-        accepted: List[RewardCandidate] = []
-        for cand in seed_candidates:
-            if not cand.valid or cand.reward_fn is None:
-                rejected.append(
-                    {
-                        "candidate_id": cand.candidate_id,
-                        "reason": cand.validation_error or "invalid",
-                        "static_report": (cand.metadata or {}).get("static_report"),
-                    }
-                )
-            else:
-                accepted.append(cand)
+        accepted = self._generate_initial_population(rejected)
+        seed_candidates = list(accepted)
+        logger.info(
+            "Initial population: %s valid (target=%s), %s rejected/replaced",
+            len(accepted),
+            cfg.population_size,
+            len(rejected),
+        )
 
         # Initial halving climb (up to illumination_max_rung, then optionally final)
         self._active_spent = self._spent
@@ -407,7 +514,13 @@ class AMFRSPipeline:
                 parents = self.archive.all_elites()
             else:
                 parents = survivors or accepted
-            children = self._propose_children(parents, gen=gen)
+            children = self._propose_children(parents, gen=gen, rejected=rejected)
+            logger.info(
+                "Gen %s children: %s valid (target=%s)",
+                gen,
+                len(children),
+                cfg.population_size,
+            )
             if not children:
                 coverages.append(self.archive.coverage())
                 continue

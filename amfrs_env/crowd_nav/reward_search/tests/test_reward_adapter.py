@@ -456,10 +456,54 @@ def compute_reward(state, memory):
 
 
 def test_sandbox_rejects_non_finite():
-    code = "def compute_reward(state, memory):\n    return math.inf\n"
+    # Overflow to IEEE inf without using math.inf / float('inf') literals.
+    code = (
+        "def compute_reward(state, memory):\n"
+        "    x = 1e308\n"
+        "    return x * 1e308\n"
+    )
     with pytest.raises(RewardSandboxError) as exc:
         RewardValidator().validate_code(code)
     assert "non-finite" in str(exc.value).lower() or "finite" in str(exc.value).lower()
+
+
+def test_sandbox_rejects_inf_literals_in_ast():
+    for code in (
+        "def compute_reward(state, memory):\n    return float('inf')\n",
+        "def compute_reward(state, memory):\n    return math.inf\n",
+        "def compute_reward(state, memory):\n    return float('nan')\n",
+    ):
+        with pytest.raises(RewardSandboxError) as exc:
+            RewardValidator().validate_code(code)
+        msg = str(exc.value).lower()
+        assert "inf" in msg or "nan" in msg or "finite" in msg or "forbidden" in msg
+
+
+def test_sandbox_sanitizes_inf_dmin_input():
+    from crowd_nav.reward_search.sandbox.runtime import sanitize_reward_state
+
+    st = _make_state()
+    # RewardState is frozen; rebuild with inf dmin via replace-like construction.
+    from crowd_nav.reward_search.state import RewardState
+
+    bad = RewardState(
+        robot=st.robot,
+        humans=st.humans,
+        dmin=float("inf"),
+        discomfort_dist=st.discomfort_dist,
+        collision=False,
+        reaching_goal=False,
+        timeout=False,
+        action=st.action,
+        time_step=st.time_step,
+        global_time=st.global_time,
+        time_limit=st.time_limit,
+    )
+    safe = sanitize_reward_state(bad)
+    assert math.isfinite(safe.dmin)
+    code = "def compute_reward(state, memory):\n    return float(state.dmin)\n"
+    fn = RewardValidator().validate_code(code)
+    assert math.isfinite(fn.compute(bad))
 
 
 def test_sandbox_rejects_numeric_overflow_before_rollout():

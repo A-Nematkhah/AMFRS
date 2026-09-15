@@ -23,6 +23,7 @@ def test_amfrs_fast_run_writes_manifest(tmp_path):
         data = json.load(fh)
     assert data["pipeline"] == "AMFRS"
     assert data["n_accepted"] >= 1
+    assert data["n_accepted"] == data["config"]["population_size"]
     assert data["config"]["fast"] is True
     # Final climb must evaluate rungs above illumination (F2 in fast profile).
     levels = [e["level"] for e in data.get("promotion_log") or []]

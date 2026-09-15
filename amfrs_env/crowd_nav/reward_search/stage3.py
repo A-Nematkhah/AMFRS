@@ -412,6 +412,10 @@ class RealPolicyTrainer(PolicyTrainer):
         torch.manual_seed(algo_args.seed)
         torch.set_num_threads(1)
 
+        reward_fn = candidate.reward_fn
+        if hasattr(reward_fn, "set_soft_nonfinite"):
+            reward_fn.set_soft_nonfinite(True)
+
         envs = make_vec_envs(
             algo_args.env_name,
             algo_args.seed,
@@ -422,7 +426,7 @@ class RealPolicyTrainer(PolicyTrainer):
             False,
             config=env_config,
             pretext_wrapper=env_config.env.use_wrapper,
-            reward_fn=candidate.reward_fn,
+            reward_fn=reward_fn,
         )
 
         actor_critic = Policy(

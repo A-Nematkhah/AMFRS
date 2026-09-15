@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from crowd_nav.reward_search.amfrs.crossover import (
     build_semantic_crossover_prompt,
     build_initial_prompt,
@@ -22,6 +24,29 @@ def test_primitives_finite_on_synthetic_states():
         for st in states:
             v = fn(st, {})
             assert v == v and abs(v) != float("inf"), f"{name} non-finite: {v}"
+
+
+def test_min_distance_margin_handles_inf_dmin():
+    from crowd_nav.reward_search.amfrs.primitives import min_distance_margin
+    from crowd_nav.reward_search.state import RewardState, RobotRewardState
+
+    st = RewardState(
+        robot=RobotRewardState(
+            px=0.0, py=0.0, vx=0.0, vy=0.0, radius=0.3, gx=1.0, gy=0.0, v_pref=1.0
+        ),
+        humans=(),
+        dmin=float("inf"),
+        discomfort_dist=0.25,
+        collision=True,
+        reaching_goal=False,
+        timeout=False,
+        action=None,
+        time_step=0.25,
+        global_time=0.0,
+        time_limit=25.0,
+    )
+    v = min_distance_margin(st, {})
+    assert math.isfinite(v)
 
 
 def test_primitives_injected_into_sandbox():
