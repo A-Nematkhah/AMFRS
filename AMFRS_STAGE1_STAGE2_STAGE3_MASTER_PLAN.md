@@ -103,7 +103,7 @@ Path: **stabilize EvoNav baseline metrics → close Stage I↔II↔III feedback 
 - Metrics ITR/SD collected but **not primary elite scalar**  
 - Constraint-aware reward optimization (**Not Implemented**)
 
-### 2.9 RL evaluation
+### 2.9 RL evaluation23r
 
 - Stage II: short horizon `T_short`, E2 episodes, A2C (default)  
 - Stage III: full episode horizon, E3 episodes, PPO; H-sweep `{5,10,15,20}` (pipeline may clip to `H ≤ human_num`)  
