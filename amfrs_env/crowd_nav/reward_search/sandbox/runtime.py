@@ -98,6 +98,12 @@ def compile_compute_reward(code: str, config: SandboxConfig) -> ComputeFn:
     namespace = {"__builtins__": dict(_SAFE_BUILTINS)}
     if "math" in config.allowed_modules:
         namespace["math"] = math
+    extra = getattr(config, "extra_namespace", None) or {}
+    if extra:
+        for key, value in dict(extra).items():
+            if str(key) in _SAFE_BUILTINS or str(key) in {"__builtins__", "math"}:
+                continue
+            namespace[str(key)] = value
     try:
         tree = ast.parse(code, mode="exec")
         tree = _strip_import_nodes(tree)

@@ -23,6 +23,12 @@ dist/
 # Local run artifacts (regenerate via scripts/)
 results/
 data/stage1_dataset/
+data/stage1_smoke/
+data/reward_memory.sqlite
+data/reward_memory.sqlite-*
+_rvo2_src/
+_vs_BuildTools.exe
+_patch_rvo2_setup.py
 .pip_cache/
 .tmp/
 

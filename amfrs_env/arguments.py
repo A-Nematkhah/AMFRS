@@ -1,7 +1,5 @@
 import argparse
 
-import torch
-
 
 def get_args():
     parser = argparse.ArgumentParser(description='RL')
@@ -208,7 +206,12 @@ def get_args():
 
     args = parser.parse_args()
 
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+    try:
+        import torch
+        cuda_ok = torch.cuda.is_available()
+    except ImportError:
+        cuda_ok = False
+    args.cuda = not args.no_cuda and cuda_ok
 
     assert args.algo in ['a2c', 'ppo', 'acktr']
     if args.recurrent_policy:

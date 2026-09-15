@@ -33,4 +33,4 @@ jobs:
 
       - name: Fast tests (exclude slow simulator collect)
         run: |
-          python -m pytest crowd_nav/reward_search/tests -m "not slow" -q
+          python -m pytest crowd_nav/reward_search/tests crowd_nav/reward_search/amfrs/tests -m "not slow" -q

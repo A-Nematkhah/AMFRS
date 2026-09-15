@@ -7,8 +7,8 @@ receive a RewardState argument named ``state``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Tuple
 
 REQUIRED_FUNCTION_NAME = "compute_reward"
 REQUIRED_ARG_NAME = "state"
@@ -80,3 +80,6 @@ class SandboxConfig:
     forbidden_names: Tuple[str, ...] = FORBIDDEN_NAME_IDS
     allow_while: bool = False
     allow_imports: bool = False
+    # Optional callables injected into the exec namespace (AMFRS2 primitives).
+    # Default empty — baseline behavior unchanged when omitted.
+    extra_namespace: Mapping[str, Any] = field(default_factory=dict)
