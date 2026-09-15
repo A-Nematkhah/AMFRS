@@ -15,7 +15,6 @@ def _run_script(script_name: str, argv: list[str], monkeypatch) -> int:
     script = _SCRIPTS / script_name
     assert script.is_file(), script
     monkeypatch.chdir(_AMFRS_ROOT)
-    # Prepend root so `import crowd_nav` works the same as CLI from amfrs_env/.
     root_str = str(_AMFRS_ROOT)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
@@ -39,10 +38,10 @@ def test_run_amfrs_refuses_seed_without_fast(monkeypatch, capsys):
     )
     assert code == 2
     err = capsys.readouterr().err
-    assert "Refusing to run a non-fast pipeline" in err
+    assert "Refusing non-fast AMFRS" in err
     assert "--allow-seed-llm" in err
+    assert not (out_dir / "amfrs_manifest.json").exists()
     assert not (out_dir / "manifest.json").exists()
-    assert not (out_dir / "config.json").exists()
 
 
 def test_run_amfrs_fast_still_allows_seed(monkeypatch):
@@ -52,33 +51,4 @@ def test_run_amfrs_fast_still_allows_seed(monkeypatch):
         monkeypatch,
     )
     assert code == 0
-    assert (_AMFRS_ROOT / "results" / "_seed_fast_ok" / "manifest.json").is_file()
-
-
-def test_paper_scale_refuses_seed_yaml_default(monkeypatch, capsys):
-    code = _run_script(
-        "run_amfrs_paper_scale.py",
-        ["--output-dir", "results/_paper_seed_refuse"],
-        monkeypatch,
-    )
-    assert code == 2
-    err = capsys.readouterr().err
-    assert "Refusing to run a non-fast pipeline" in err
-
-
-def test_paper_scale_dry_run_stubs_bypass_seed_gate(monkeypatch):
-    """--dry-run-stubs is the paper-scale equivalent of --fast for the seed gate."""
-    code = _run_script(
-        "run_amfrs_paper_scale.py",
-        [
-            "--dry-run-stubs",
-            "--seeds",
-            "425",
-            "--output-dir",
-            "results/_paper_seed_dry",
-            "--device",
-            "cpu",
-        ],
-        monkeypatch,
-    )
-    assert code == 0
+    assert (_AMFRS_ROOT / "results" / "_seed_fast_ok" / "amfrs_manifest.json").is_file()

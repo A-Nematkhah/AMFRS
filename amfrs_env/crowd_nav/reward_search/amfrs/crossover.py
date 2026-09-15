@@ -1,5 +1,5 @@
 """
-Axis 3 — primitive-aware / semantic crossover prompt builders (AMFRS2-only).
+Axis 3 — primitive-aware / semantic crossover prompt builders (AMFRS-only).
 
 Does not modify baseline ``prompts.py``.
 """
@@ -11,7 +11,7 @@ from typing import Any, Mapping, Optional
 from crowd_nav.reward_search.amfrs.primitives import primitive_signatures_block
 from crowd_nav.reward_search.evolver import RewardCandidate
 
-AMFRS2_SYSTEM_PROMPT = (
+AMFRS_SYSTEM_PROMPT = (
     "You are an expert in reinforcement learning and robot crowd navigation. "
     "Design compute_reward(state, memory) functions. Prefer composing named "
     "primitives with explicit numeric weights. Return only a Python code block."

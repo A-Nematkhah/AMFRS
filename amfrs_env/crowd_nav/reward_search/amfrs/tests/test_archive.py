@@ -46,14 +46,14 @@ def test_archive_json_roundtrip(tmp_path):
 
 
 def test_pipeline_coverage_nondecreasing(tmp_path):
-    from crowd_nav.reward_search.amfrs import AMFRS2Pipeline, AMFRS2RunConfig
+    from crowd_nav.reward_search.amfrs import AMFRSPipeline, AMFRSRunConfig
 
-    cfg = AMFRS2RunConfig(output_dir=str(tmp_path / "a"))
+    cfg = AMFRSRunConfig(output_dir=str(tmp_path / "a"))
     cfg.apply_fast_profile()
     cfg.output_dir = str(tmp_path / "a")
     cfg.generations = 3
     cfg.population_size = 4
-    art = AMFRS2Pipeline(cfg).run()
+    art = AMFRSPipeline(cfg).run()
     cov = art.manifest.get("coverage_over_generations") or []
     assert cov, "expected coverage trace"
     # Non-decreasing: each step >= previous

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from crowd_nav.reward_search.evolver import RewardCandidate
-from crowd_nav.reward_search.pipeline import AMFRSPipeline
 from crowd_nav.reward_search.selection import (
     attach_h_profile,
+    best_by_ever_metrics,
     candidate_nav_scalar,
     h_profile_scalar,
     navigation_scalar,
@@ -168,7 +168,7 @@ def test_pipeline_best_by_ever_uses_snapshots_not_last_round_only():
             kept_previous=False,
         ),
     ]
-    best = AMFRSPipeline._best_by_ever_metrics(
+    best = best_by_ever_metrics(
         [r1], history, trained_snapshots=[r0, r1]
     )
     assert best.candidate_id == "mut_0060_v2"

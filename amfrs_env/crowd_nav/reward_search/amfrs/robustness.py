@@ -96,7 +96,7 @@ def _run_policy_sweep_real(
     predict_method: str = "none",
     human_num: int = 5,
     seed: int = 425,
-    output_root: str = "trained_models/amfrs2_robustness",
+    output_root: str = "trained_models/amfrs_robustness",
     randomization_regime: str = "without_random",
 ) -> Dict[str, Dict[str, Any]]:
     """
@@ -170,7 +170,7 @@ def run_policy_sweep(
     predict_method: str = "none",
     human_num: int = 5,
     seed: int = 425,
-    output_root: str = "trained_models/amfrs2_robustness",
+    output_root: str = "trained_models/amfrs_robustness",
     randomization_regime: str = "without_random",
 ) -> Dict[str, Dict[str, Any]]:
     """

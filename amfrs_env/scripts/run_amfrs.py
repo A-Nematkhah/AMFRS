@@ -1,22 +1,18 @@
 #!/usr/bin/env python
 """
-Single entry point for AMFRS Algorithm 1 (faithful replication baseline).
+Single entry point for AMFRS (multi-fidelity reward search).
 
-  seed generation → Stage I → Stage II → Stage III
+Examples (from ``amfrs_env/``)::
 
-No AMFRS mechanisms (novelty archive, Pareto ranking, adaptive controller).
-
-Examples (from ``amfrs_env/`` with system Python)::
-
-    # Seconds-scale dry run (stub trainers + seed LLM)
     python scripts/run_amfrs.py --fast --output-dir results/amfrs_fast
 
-    # Practical local run (real trainers, reduced Stage III K3)
-    python scripts/run_amfrs.py --llm seed --output-dir results/amfrs_local
+    # Real trainers without GST (obs = none):
+    python scripts/run_amfrs.py --allow-seed-llm --predict-method none \\
+        --score1 smoke --device cpu --output-dir results/amfrs_real_none
 
-    # Paper-faithful Stage III budget on a GPU cluster
-    python scripts/run_amfrs.py --llm vllm --stage3-train-steps 10000000 \\
-        --device cuda --output-dir results/amfrs_paper
+    # Real trainers with GST (after scripts/fetch_gst_weights.py):
+    python scripts/run_amfrs.py --allow-seed-llm --predict-method inferred \\
+        --score1 smoke --device cuda --output-dir results/amfrs_real_gst
 """
 
 from __future__ import annotations
@@ -36,247 +32,144 @@ os.chdir(_ROOT)
 
 
 def main() -> int:
-    from crowd_nav.reward_search.pipeline import AMFRSPipeline, AMFRSRunConfig
-    from crowd_nav.reward_search.stage3 import STAGE3_PAPER_STEPS, STAGE3_STEPS
+    from crowd_nav.reward_search.amfrs import AMFRSPipeline, AMFRSRunConfig
+    from crowd_nav.reward_search.amfrs.assets import check_amfrs_assets
 
-    parser = argparse.ArgumentParser(description="AMFRS Algorithm 1 end-to-end")
+    parser = argparse.ArgumentParser(description="AMFRS end-to-end")
     parser.add_argument("--output-dir", type=str, default="results/amfrs_run")
     parser.add_argument("--seed", type=int, default=425)
-    parser.add_argument("--llm-model", type=str, default=None)
+    parser.add_argument("--fast", action="store_true", help="Stub / smoke dry-run profile")
     parser.add_argument(
         "--llm",
         type=str,
         default="seed",
         choices=["seed", "groq", "vllm", "ollama", "scripted"],
-        help="LLM provider (seed = local D.5 variants, no API key; "
-        "non-fast runs require a real provider or --allow-seed-llm)",
     )
-    parser.add_argument(
-        "--allow-seed-llm",
-        action="store_true",
-        help="Permit --llm seed on a non-fast run (debug / wiring without API cost)",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Extra DEBUG-level terminal detail (sandbox previews, etc.)",
-    )
-    parser.add_argument(
-        "--score1",
-        type=str,
-        default="dataset",
-        choices=["dataset", "smoke"],
-        help="Stage I scorer: dataset=Score1 on pre-collected trajs; smoke=fast-test only",
-    )
-    parser.add_argument(
-        "--stage1-dataset",
-        type=str,
-        default="data/stage1_dataset",
-        help="Path from scripts/collect_stage1_dataset.py",
-    )
-    parser.add_argument("--fast", action="store_true", help="Stub trainers + smoke Score1")
-    parser.add_argument(
-        "--easy",
-        action="store_true",
-        help=(
-            "Easier env for pipeline result-getting: predict_method=none, "
-            "5 humans, longer Stage II horizon. Not for paper claims."
-        ),
-    )
-    parser.add_argument(
-        "--human-num",
-        type=int,
-        default=None,
-        help="Crowd size for Stage II/III train (default 20; --easy sets 5)",
-    )
-    parser.add_argument(
-        "--h-sweep-counts",
-        type=str,
-        default=None,
-        help=(
-            "Comma-separated H values for Stage III generalization sweep "
-            "(must be <= --human-num). Example: 3,5,7. Default: paper "
-            "{5,10,15,20} clipped to human-num."
-        ),
-    )
+    parser.add_argument("--allow-seed-llm", action="store_true")
+    parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--population-size", type=int, default=None)
+    parser.add_argument("--generations", type=int, default=None)
     parser.add_argument(
         "--predict-method",
         type=str,
         default=None,
-        choices=["inferred", "none", "const_vel", "truth"],
-        help="Override sim.predict_method (default inferred; --easy/--fast use none)",
-    )
-    parser.add_argument(
-        "--scale",
-        type=str,
-        default=None,
-        choices=["paper"],
+        choices=["inferred", "none"],
         help=(
-            "Named budget preset. 'paper' redirects to scripts/run_amfrs_paper_scale.py "
-            "(Tables 3–6, multi-seed); not used by pytest."
+            "Default inferred; --fast forces none. Use none if GST missing. "
+            "Only inferred|none are wired through AMFRS trainers/regime."
         ),
     )
-    parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
     parser.add_argument(
-        "--num-processes",
-        type=int,
-        default=None,
-        help="Parallel envs for Stage II/III (default: auto). Use 2-4 on 4GB GPUs.",
-    )
-    parser.add_argument(
-        "--regime",
+        "--score1",
         type=str,
-        default="without_random",
-        choices=["without_random", "with_random", "both"],
-        help="EVOLUTION_RANDOMIZATION_REGIME (AUDIT.md §8.1; default without_random)",
+        default=None,
+        choices=["dataset", "smoke"],
+        help="F0 scorer (default dataset; smoke if --fast)",
     )
-
-    parser.add_argument("--stage1-population", type=int, default=8)
-    parser.add_argument("--stage1-generations", type=int, default=10)
-
-    parser.add_argument("--stage2-rounds", type=int, default=16)
+    parser.add_argument("--stage1-dataset", type=str, default="data/stage1_dataset")
+    parser.add_argument("--regime", type=str, default="without_random")
+    parser.add_argument("--human-num", type=int, default=None)
     parser.add_argument(
-        "--stage2-train-steps",
-        type=int,
-        default=50_000,
-        help="K2 env steps per Stage II candidate (paper=8000; default 5e4 for ranking)",
+        "--use-stub",
+        action="store_true",
+        help="Force stub trainers even without --fast",
     )
-    parser.add_argument("--stage2-eval-episodes", type=int, default=50)
-    parser.add_argument("--stage2-stub", action="store_true")
-
     parser.add_argument(
-        "--stage3-train-steps",
-        type=int,
-        default=STAGE3_STEPS,
-        help=f"K3 env steps (default={STAGE3_STEPS}; paper={STAGE3_PAPER_STEPS})",
+        "--check-assets-only",
+        action="store_true",
+        help="Print asset status and exit (0=ok, 1=missing)",
     )
-    parser.add_argument("--stage3-rounds", type=int, default=3)
-    parser.add_argument("--stage3-eval-episodes", type=int, default=500)
-    parser.add_argument("--stage3-stub", action="store_true")
-    parser.add_argument("--no-h-sweep", action="store_true")
-    parser.add_argument(
-        "--stage3-max-finalists",
-        type=int,
-        default=3,
-        help="Admit only top-k Stage II genomes into Stage III (Phase 3)",
-    )
-
+    parser.add_argument("--stage2-train-steps", type=int, default=None)
+    parser.add_argument("--stage2-train-steps-short", type=int, default=None)
+    parser.add_argument("--stage3-train-steps", type=int, default=None)
+    parser.add_argument("--num-processes", type=int, default=None)
     args = parser.parse_args()
 
-    if args.scale == "paper":
-        # Multi-seed paper budgets live in a dedicated human-triggered script.
-        print(
-            "Paper-scale (Tables 3–6, multi-seed) is only available via:\n"
-            "  python scripts/run_amfrs_paper_scale.py\n"
-            "Pass --seeds / --device there. This keeps pytest/--fast unchanged "
-            "and avoids accidental CI runs of K3=1e7.",
-            file=sys.stderr,
+    if args.check_assets_only:
+        report = check_amfrs_assets(
+            regime=args.regime,
+            predict_method=args.predict_method or "inferred",
+            score1_mode=args.score1 or "dataset",
+            stage1_dataset_path=args.stage1_dataset,
+            use_stub=bool(args.fast or args.use_stub),
+            root=_ROOT,
         )
-        return 2
+        print(report.format_text())
+        return 0 if report.ok else 1
 
-    # Fail closed before Config / GST / dataset / simulator work.
     if (
         not args.fast
         and str(args.llm).strip().lower() == "seed"
         and not args.allow_seed_llm
     ):
         print(
-            "Refusing to run a non-fast pipeline with the seed (no real LLM) "
-            "provider — pass --llm groq|ollama|vllm explicitly, or pass "
-            "--allow-seed-llm if this is intentional (e.g. debugging Stage II/III "
-            "wiring without LLM cost).",
+            "Refusing non-fast AMFRS with --llm seed. "
+            "Pass a real provider or --allow-seed-llm / --fast.",
             file=sys.stderr,
         )
         return 2
-
-    # Protect Config.get_args() class-body from our CLI flags.
-    sys.argv = [sys.argv[0], "--no-cuda" if args.device == "cpu" else "--seed", str(args.seed)]
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    from crowd_nav.reward_search import console as _console
 
-    _console.set_verbose(bool(args.verbose))
-
-    import crowd_sim  # noqa: F401
+    # Protect Config.get_args() from our CLI when real trainers parse argv.
+    sanitized = [sys.argv[0], "--seed", str(args.seed)]
+    if args.device == "cpu":
+        sanitized.append("--no-cuda")
+    sys.argv = sanitized
 
     cfg = AMFRSRunConfig(
         output_dir=args.output_dir,
         seed=args.seed,
         llm_provider=args.llm,
-        llm_model=args.llm_model,
-        score1_mode="smoke" if args.fast else args.score1,
-        stage1_dataset_path=args.stage1_dataset,
-        stage1_population=args.stage1_population,
-        stage1_generations=args.stage1_generations,
-        stage2_rounds=args.stage2_rounds,
-        stage2_train_steps=args.stage2_train_steps,
-        stage2_eval_episodes=args.stage2_eval_episodes,
-        stage2_use_stub=args.stage2_stub or args.fast,
-        stage3_rounds=args.stage3_rounds,
-        stage3_train_steps=args.stage3_train_steps,
-        stage3_eval_episodes=args.stage3_eval_episodes,
-        stage3_use_stub=args.stage3_stub or args.fast,
-        stage3_run_h_sweep=not args.no_h_sweep,
-        stage3_max_finalists=args.stage3_max_finalists,
         device=args.device,
-        num_processes=args.num_processes,
+        allow_seed_llm=bool(args.allow_seed_llm),
+        stage1_dataset_path=args.stage1_dataset,
         randomization_regime=args.regime,
-        predict_method="none" if args.fast else "inferred",
-        human_num=20,
+        num_processes=args.num_processes,
     )
-    if args.regime == "both":
-        print(
-            "regime=both requires two separate full Algorithm-1 passes "
-            "(doubled budget). Use --regime without_random or with_random.",
-            file=sys.stderr,
-        )
-        return 2
     if args.fast:
         cfg.apply_fast_profile()
         cfg.output_dir = args.output_dir
         cfg.seed = args.seed
-    if args.easy and not args.fast:
-        cfg.apply_easy_profile()
+    if args.use_stub:
+        cfg.use_stub_trainers = True
+        if args.score1 is None and not args.fast:
+            cfg.score1_mode = "smoke"
     if args.predict_method is not None and not args.fast:
         cfg.predict_method = args.predict_method
+    if args.score1 is not None and not args.fast:
+        cfg.score1_mode = args.score1
+    if args.population_size is not None:
+        cfg.population_size = max(1, int(args.population_size))
+    if args.generations is not None:
+        cfg.generations = max(0, int(args.generations))
     if args.human_num is not None:
         cfg.human_num = max(1, int(args.human_num))
-    if args.h_sweep_counts is not None:
-        parts = [p.strip() for p in str(args.h_sweep_counts).split(",") if p.strip()]
-        try:
-            counts = tuple(int(p) for p in parts)
-        except ValueError:
-            print(
-                f"Invalid --h-sweep-counts={args.h_sweep_counts!r}; "
-                "expected comma-separated ints like 3,5,7",
-                file=sys.stderr,
-            )
-            return 2
-        if not counts:
-            print("--h-sweep-counts is empty", file=sys.stderr)
-            return 2
-        cfg.stage3_h_counts = counts
+    if args.stage2_train_steps is not None:
+        cfg.stage2_train_steps = int(args.stage2_train_steps)
+    if args.stage2_train_steps_short is not None:
+        cfg.stage2_train_steps_short = int(args.stage2_train_steps_short)
+    if args.stage3_train_steps is not None:
+        cfg.stage3_train_steps = int(args.stage3_train_steps)
 
-    logging.info(
-        "AMFRS Algorithm 1 → %s (fast=%s, easy=%s, humans=%d, predict=%s, "
-        "K3=%d, h_sweep=%s)",
-        cfg.output_dir,
-        cfg.fast,
-        bool(args.easy),
-        cfg.human_num,
-        cfg.predict_method,
-        cfg.stage3_train_steps,
-        cfg.stage3_h_counts
-        if cfg.stage3_h_counts is not None
-        else "auto",
+    try:
+        artifacts = AMFRSPipeline(cfg).run()
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(
+        f"[amfrs] done | accepted={len(artifacts.accepted_candidates)} "
+        f"rejected={len(artifacts.rejected)} "
+        f"best={artifacts.best.candidate_id if artifacts.best else None} "
+        f"stub={cfg.use_stub_trainers or cfg.fast} "
+        f"-> {cfg.output_dir}"
     )
-    artifacts = AMFRSPipeline(cfg).run()
-    logging.info("Done. Final candidate: %s", artifacts.best_stage3.candidate_id)
-    logging.info("Artifacts: %s", artifacts.output_dir)
     return 0
 
 

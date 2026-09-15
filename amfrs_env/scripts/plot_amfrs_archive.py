@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-Plot AMFRS2 MAP-Elites archive heatmap and optional cost-vs-quality curve.
+Plot AMFRS MAP-Elites archive heatmap and optional cost-vs-quality curve.
 
 Usage (from amfrs_env/)::
 
-    python scripts/plot_amfrs2_archive.py --run-dir results/amfrs2_fast
+    python scripts/plot_amfrs_archive.py --run-dir results/amfrs_fast
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import sys
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Plot AMFRS2 archive / cost trace")
+    parser = argparse.ArgumentParser(description="Plot AMFRS archive / cost trace")
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--out-dir", type=str, default=None)
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main() -> int:
         im = ax.imshow(grid, origin="lower", aspect="auto")
         ax.set_xlabel("path_efficiency bin")
         ax.set_ylabel("social_margin bin")
-        ax.set_title("AMFRS2 MAP-Elites archive")
+        ax.set_title("AMFRS MAP-Elites archive")
         fig.colorbar(im, ax=ax, label="fitness")
         for (by, bx), cid in annotations.items():
             ax.text(bx, by, str(cid)[:8], ha="center", va="center", fontsize=7, color="w")
@@ -69,7 +69,7 @@ def main() -> int:
         ax.plot(xs, ys, marker="o", linewidth=1.5)
         ax.set_xlabel("cumulative cost units")
         ax.set_ylabel("best metric so far")
-        ax.set_title("AMFRS2 cost vs quality")
+        ax.set_title("AMFRS cost vs quality")
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "cost_vs_quality.png"), dpi=140)
         plt.close(fig)

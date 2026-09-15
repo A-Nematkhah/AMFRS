@@ -224,3 +224,59 @@ def pick_best_by_h_profile(
         metadata={**(scored[0][1].metadata or {}), "h_aware_selected": True},
     )
     return best
+
+
+def include_global_best(
+    population: List[RewardCandidate], global_best: RewardCandidate
+) -> List[RewardCandidate]:
+    """Ensure ``global_best`` is in the population (replace worst slot if needed)."""
+    if any(candidate.candidate_id == global_best.candidate_id for candidate in population):
+        return population
+    worst_index = min(
+        range(len(population)),
+        key=lambda index: (
+            population[index].score
+            if population[index].score is not None
+            else float("-inf")
+        ),
+    )
+    population[worst_index] = global_best
+    return population
+
+
+def best_by_ever_metrics(
+    population: Sequence[RewardCandidate],
+    history: Sequence[Any],
+    trained_snapshots: Optional[Sequence[RewardCandidate]] = None,
+) -> RewardCandidate:
+    """
+    Pick the best-ever trained genome by navigation scalar across rounds.
+
+    Prefers explicit trained snapshots; falls back to history + population.
+    """
+    if trained_snapshots:
+        best = pick_best_trained(trained_snapshots)
+        if best is not None:
+            return best
+
+    best_hist = None
+    best_score = float("-inf")
+    if history:
+        for r in history:
+            score = float(r.metrics.scalar_score())
+            if score > best_score:
+                best_score = score
+                best_hist = r
+
+    def _key(c: RewardCandidate) -> float:
+        m = (c.metadata or {}).get("last_metrics")
+        if m:
+            return navigation_scalar_from_dict(m)
+        if best_hist is not None and (
+            c.candidate_id == best_hist.candidate_id
+            or best_hist.candidate_id in (c.parent_ids or ())
+        ):
+            return best_score
+        return float(c.score or float("-inf"))
+
+    return max(population, key=_key)

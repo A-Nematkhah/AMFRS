@@ -162,9 +162,9 @@ def test_global_best_survives_a_regressive_generation():
     assert evolver.global_best is initial[0]
     assert evolver.global_best not in final
 
-    from crowd_nav.reward_search.pipeline import AMFRSPipeline
+    from crowd_nav.reward_search.selection import include_global_best
 
-    handed_to_stage2 = AMFRSPipeline._include_global_best(final, evolver.global_best)
+    handed_to_stage2 = include_global_best(final, evolver.global_best)
     assert any(candidate.candidate_id == initial[0].candidate_id for candidate in handed_to_stage2)
 
 

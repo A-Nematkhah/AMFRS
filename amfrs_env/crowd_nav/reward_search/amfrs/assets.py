@@ -1,5 +1,5 @@
 """
-Asset presence checks for AMFRS2 real (non-stub) runs.
+Asset presence checks for AMFRS real (non-stub) runs.
 
 Pure stdlib — no torch/gym at import time.
 """
@@ -148,7 +148,7 @@ def check_stage1_dataset(
     )
 
 
-def check_amfrs2_assets(
+def check_amfrs_assets(
     *,
     regime: str = "without_random",
     predict_method: str = "inferred",
@@ -158,7 +158,7 @@ def check_amfrs2_assets(
     root: Optional[str] = None,
 ) -> AssetReport:
     """
-    What a non-stub AMFRS2 run needs given predict/score settings.
+    What a non-stub AMFRS run needs given predict/score settings.
 
     ``use_stub=True`` / ``--fast`` → empty report (ok).
     """
@@ -191,9 +191,9 @@ def check_amfrs2_assets(
     return report
 
 
-def require_amfrs2_assets(**kwargs: Any) -> AssetReport:
+def require_amfrs_assets(**kwargs: Any) -> AssetReport:
     """Raise ``FileNotFoundError`` with a clear remediation message if missing."""
-    report = check_amfrs2_assets(**kwargs)
+    report = check_amfrs_assets(**kwargs)
     if report.ok:
         return report
     tips = [

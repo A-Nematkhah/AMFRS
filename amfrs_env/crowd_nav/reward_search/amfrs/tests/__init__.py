@@ -1,1 +1,1 @@
-# AMFRS2 unit tests
+# AMFRS unit tests

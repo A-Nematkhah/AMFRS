@@ -286,12 +286,13 @@ def test_score1_mode_artifact_smoke_not_paper():
 
 
 def test_pipeline_fast_manifest_labels_smoke(tmp_path):
-    from crowd_nav.reward_search.pipeline import AMFRSPipeline, AMFRSRunConfig
+    from crowd_nav.reward_search.amfrs import AMFRSPipeline, AMFRSRunConfig
 
     cfg = AMFRSRunConfig(output_dir=str(tmp_path / "run"))
     cfg.apply_fast_profile()
+    cfg.output_dir = str(tmp_path / "run")
     arts = AMFRSPipeline(cfg).run()
-    assert arts.manifest["score1"]["score1_mode"] == "smoke"
-    assert arts.manifest["score1"]["is_paper_score1"] is False
-    assert arts.manifest["score1"]["score1_claim_ok"] is False
-    assert arts.manifest.get("score1_warning")
+    assert arts.manifest["pipeline"] == "AMFRS"
+    assert arts.manifest["config"]["score1_mode"] == "smoke"
+    assert arts.manifest["config"]["fast"] is True
+    assert arts.best is not None

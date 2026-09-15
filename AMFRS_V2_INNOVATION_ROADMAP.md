@@ -1,19 +1,14 @@
 # AMFRS v2 — Innovation Roadmap (Axes 1–5)
 
-**Status:** Draft roadmap for the *actual thesis contribution*, independent of EvoNav fidelity.
-**Supersedes:** `AMFRS_STAGE1_STAGE2_STAGE3_MASTER_PLAN.md` §12 Phase 5 (T15–T19). Phases 0–4 of that
-document (trustworthy Stage I, stable Stage II accept/reject gate, Stage III finalist tournament,
-shared harness) are **kept as-is** and treated as a frozen, working baseline — see "Non-negotiables"
-below.
-**Audience:** This file is written to be handed to Cursor as an implementation brief. Every task
-names the exact file to create/touch, the exact class/function signature expected, its
-dependencies, and how to validate it. Task IDs are `A<axis>.<n>` and do not reuse the old `T#`
-numbering, to make it unambiguous that this is a new track of work.
-**Ground truth this roadmap was built against (verified by direct code inspection, 2026-09-15):**
-`amfrs_env/crowd_nav/reward_search/{pipeline,evolver,stage2,stage3,selection,state,sandbox/*,
-llm,dataset,scoring,rules,reporting,refine_harness}.py`. Class/function names quoted below are the
-real ones in the repo, not paraphrases — check them against the file before writing code that
-assumes a different name.
+**Status (2026-09-15):** Implementation track **merged into the sole AMFRS path**.
+Naming in the sections below may still say `AMFRS2Pipeline` / `run_amfrs2.py` —
+in code these are now `AMFRSPipeline` / `scripts/run_amfrs.py` under
+`crowd_nav/reward_search/amfrs/`. The frozen dual-baseline constraint in §1 is
+**retired** (Alg1 orchestrator removed). Keep this file as the feature checklist
+for axes 1–5 (scenarios YAML still open).
+
+**Audience:** Historical implementation brief + remaining open tasks.
+**Ground truth:** `amfrs_env/crowd_nav/reward_search/amfrs/`.
 
 ---
 

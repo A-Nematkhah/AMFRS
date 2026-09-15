@@ -1,7 +1,5 @@
 """
-AMFRS2 run configuration.
-
-Independent of ``AMFRSRunConfig`` — do not subclass the baseline dataclass.
+AMFRS run configuration.
 """
 
 from __future__ import annotations
@@ -11,10 +9,10 @@ from typing import Any, Dict, Literal, Optional, Tuple
 
 
 @dataclass
-class AMFRS2RunConfig:
-    """End-to-end AMFRS2 settings (axes 1–5)."""
+class AMFRSRunConfig:
+    """End-to-end AMFRS settings (axes 1–5)."""
 
-    output_dir: str = "results/amfrs2_run"
+    output_dir: str = "results/amfrs_run"
     seed: int = 425
 
     # Population / illumination

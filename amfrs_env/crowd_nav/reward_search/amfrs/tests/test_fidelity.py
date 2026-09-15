@@ -101,14 +101,14 @@ def test_halving_respects_budget_before_first_eval():
 
 
 def test_pipeline_halving_shrinks_population(tmp_path):
-    from crowd_nav.reward_search.amfrs import AMFRS2Pipeline, AMFRS2RunConfig
+    from crowd_nav.reward_search.amfrs import AMFRSPipeline, AMFRSRunConfig
 
-    cfg = AMFRS2RunConfig(output_dir=str(tmp_path / "h"))
+    cfg = AMFRSRunConfig(output_dir=str(tmp_path / "h"))
     cfg.apply_fast_profile()
     cfg.output_dir = str(tmp_path / "h")
     cfg.population_size = 6
     cfg.generations = 1
-    art = AMFRS2Pipeline(cfg).run()
+    art = AMFRSPipeline(cfg).run()
     assert art.promotion_log, "expected promotion decisions"
     # First rung should start from accepted (>=1); later rungs shrink or stay
     sizes = [e["n_survivors"] for e in art.promotion_log]

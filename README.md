@@ -1,21 +1,20 @@
 # AMFRS
 
 **AMFRS** is our research codebase for robot crowd navigation with evolved
-reward functions.
-
-[describe AMFRS's novel contribution here]
+reward functions (multi-fidelity search, MAP-Elites archive, static gate,
+robustness sweep).
 
 ## Status
 
-AMFRS is under active development; the current codebase is a renamed fork of
-an EvoNav Algorithm 1 baseline reproduction, to be extended with our own
-contributions.
+Single pipeline path: `scripts/run_amfrs.py` → `AMFRSPipeline`
+(`crowd_nav/reward_search/amfrs/`). Shared CrowdNav++ / Stage II–III trainers
+remain as libraries under `reward_search/`.
 
 ## Repository layout
 
 | Directory | Role |
 |-----------|------|
-| `amfrs_env/` | Main project tree (CrowdNav++ simulator + reward-search pipeline) |
+| `amfrs_env/` | Main project tree (CrowdNav++ simulator + AMFRS reward search) |
 | `baselines_openai/` | Trimmed OpenAI Baselines (vec_env / logger / bench only) |
 
 `amfrs_env` is a **derivative work** of
@@ -36,36 +35,18 @@ pip install -e ../baselines_openai --no-build-isolation
 python scripts/run_amfrs.py --fast --output-dir results/amfrs_fast
 
 # Tests
-pytest crowd_nav/reward_search/tests -m "not slow"
+pytest crowd_nav/reward_search/tests crowd_nav/reward_search/amfrs/tests -m "not slow"
 ```
 
-See **`amfrs_env/README_AMFRS.md`** for Algorithm 1 runs, paper-scale budgets, and API keys.
+See **`amfrs_env/README_AMFRS.md`** for runs, assets, and API keys.
 Simulator train/test docs: **`amfrs_env/README.md`**. Architecture notes: **`amfrs_env/AUDIT.md`**.
 
 ## Groq API keys
 
 Copy `amfrs_env/groq_keys.json.example` → `amfrs_env/groq_keys.json` (gitignored). Never commit real keys.
 
-## Baseline / Prior work
+## Prior work
 
-This repository currently embeds a faithful replication of **EvoNav Algorithm 1**
-(arXiv:2605.11859) on the CrowdNav++ simulator. That baseline remains intact as
-a reference and comparison point while AMFRS contributions are developed on top.
-
-We will cite the following prior works in our paper:
-
-```bibtex
-@article{evonav2026,
-  title   = {EvoNav},
-  eprint  = {arXiv:2605.11859},
-  year    = {2026}
-}
-
-@inproceedings{liu2023crowdnavpp,
-  title     = {Intention Aware Robot Crowd Navigation with Attention-Based Interaction Graph},
-  author    = {Liu, Shuijing and Chang, Peixin and Huang, Zhe and others},
-  booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
-  year      = {2023},
-  pages     = {12015--12021}
-}
-```
+Built on CrowdNav++ (ICRA 2023) and ideas from EvoNav-style reward evolution.
+The dual “Algorithm 1 baseline vs AMFRS2” entry points were consolidated into
+this single AMFRS path.

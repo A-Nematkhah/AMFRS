@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Print GST / Stage I dataset readiness for AMFRS2 real runs."""
+"""Print GST / Stage I dataset readiness for AMFRS real runs."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ os.chdir(_ROOT)
 
 
 def main() -> int:
-    from crowd_nav.reward_search.amfrs.assets import check_amfrs2_assets, check_all_gst
+    from crowd_nav.reward_search.amfrs.assets import check_amfrs_assets, check_all_gst
 
     parser = argparse.ArgumentParser(description="Check AMFRS runtime assets")
     parser.add_argument("--regime", default="without_random")
@@ -34,7 +34,7 @@ def main() -> int:
         ))
         return 0 if payload["ok"] else 1
 
-    report = check_amfrs2_assets(
+    report = check_amfrs_assets(
         regime=args.regime,
         predict_method=args.predict_method,
         score1_mode=args.score1,

@@ -1,10 +1,8 @@
 """
-AMFRS2 pipeline orchestrator (innovation track).
+AMFRS pipeline orchestrator.
 
 Wires axes 1–5: static gate → successive halving → MAP-Elites illumination →
 optional retrieval memory / ensemble critique → robustness on final elites.
-
-Does not call or modify ``AMFRSPipeline``.
 """
 
 from __future__ import annotations
@@ -23,16 +21,16 @@ from crowd_nav.reward_search.amfrs.behavior import (
     compute_behavior_descriptor,
     grid_shape_from_config,
 )
-from crowd_nav.reward_search.amfrs.config import AMFRS2RunConfig
+from crowd_nav.reward_search.amfrs.config import AMFRSRunConfig
 from crowd_nav.reward_search.amfrs.crossover import (
-    AMFRS2_SYSTEM_PROMPT,
+    AMFRS_SYSTEM_PROMPT,
     build_initial_prompt,
     build_memory_block,
     build_mutation_prompt,
     build_semantic_crossover_prompt,
 )
 from crowd_nav.reward_search.amfrs.ensemble_critique import critique_agrees
-from crowd_nav.reward_search.amfrs.assets import require_amfrs2_assets
+from crowd_nav.reward_search.amfrs.assets import require_amfrs_assets
 from crowd_nav.reward_search.amfrs.fidelity import TrainerContext, build_default_ladder
 from crowd_nav.reward_search.amfrs.halving import HalvingConfig, SuccessiveHalvingScheduler
 from crowd_nav.reward_search.amfrs.memory import RewardMemory
@@ -59,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AMFRS2Artifacts:
+class AMFRSArtifacts:
     """Serializable run outputs for compare / thesis figures."""
 
     output_dir: str
@@ -74,7 +72,7 @@ class AMFRS2Artifacts:
 
     def write(self) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
-        path = os.path.join(self.output_dir, "amfrs2_manifest.json")
+        path = os.path.join(self.output_dir, "amfrs_manifest.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.manifest, fh, indent=2, default=str)
         if self.archive is not None:
@@ -85,10 +83,10 @@ class AMFRS2Artifacts:
         logger.info("Wrote %s", path)
 
 
-class AMFRS2Pipeline:
+class AMFRSPipeline:
     """Additive AMFRS v2 search pipeline."""
 
-    def __init__(self, config: AMFRS2RunConfig) -> None:
+    def __init__(self, config: AMFRSRunConfig) -> None:
         self.config = config
         sandbox_cfg = SandboxConfig(extra_namespace=dict(PRIMITIVE_REGISTRY))
         self.validator = RewardValidator(config=sandbox_cfg)
@@ -181,7 +179,7 @@ class AMFRS2Pipeline:
                 )
             else:
                 prompt = build_initial_prompt(memory_block=self._memory_block_for(seed_code))
-                raw = self.llm_a.complete(AMFRS2_SYSTEM_PROMPT + "\n" + prompt)
+                raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
                 code = normalize_to_compute_reward(extract_python_code(raw) or raw)
             cand = self._validate_and_gate(code, cid, "initial")
             if cand is not None:
@@ -317,7 +315,7 @@ class AMFRS2Pipeline:
                 )
             else:
                 prompt = build_mutation_prompt(parent, memory_block=mem)
-                raw = self.llm_a.complete(AMFRS2_SYSTEM_PROMPT + "\n" + prompt)
+                raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
                 code = normalize_to_compute_reward(extract_python_code(raw) or raw)
             cand = self._validate_and_gate(code, cid, "mutation")
             if cand is not None and cand.valid:
@@ -357,19 +355,19 @@ class AMFRS2Pipeline:
                     b,
                     memory_block=self._memory_block_for(a.code),
                 )
-                raw = self.llm_a.complete(AMFRS2_SYSTEM_PROMPT + "\n" + prompt)
+                raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
                 code = normalize_to_compute_reward(extract_python_code(raw) or raw)
             xc = self._validate_and_gate(code, cid, "crossover")
             if xc is not None and xc.valid:
                 children.append(xc)
         return children
 
-    def run(self) -> AMFRS2Artifacts:
+    def run(self) -> AMFRSArtifacts:
         cfg = self.config
         os.makedirs(cfg.output_dir, exist_ok=True)
 
         use_stub = bool(cfg.use_stub_trainers or cfg.fast)
-        asset_report = require_amfrs2_assets(
+        asset_report = require_amfrs_assets(
             regime=cfg.randomization_regime,
             predict_method=cfg.predict_method,
             score1_mode=cfg.score1_mode,
@@ -502,7 +500,7 @@ class AMFRS2Pipeline:
             best = ranked[0]
 
         manifest: Dict[str, Any] = {
-            "pipeline": "AMFRS2",
+            "pipeline": "AMFRS",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "config": cfg.to_dict(),
             "n_seed": len(seed_candidates),
@@ -518,12 +516,12 @@ class AMFRS2Pipeline:
             "assets": asset_report.to_dict(),
             "use_stub_trainers": use_stub,
             "notes": (
-                "Innovation track. Baseline AMFRSPipeline untouched. "
+                "AMFRS multi-fidelity search. "
                 "Axes: static gate, successive halving, MAP-Elites, "
                 "primitives/memory, multi-policy robustness."
             ),
         }
-        artifacts = AMFRS2Artifacts(
+        artifacts = AMFRSArtifacts(
             output_dir=cfg.output_dir,
             seed_candidates=seed_candidates,
             accepted_candidates=accepted,

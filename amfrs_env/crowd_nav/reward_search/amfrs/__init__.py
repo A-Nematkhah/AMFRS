@@ -1,14 +1,14 @@
 """
-AMFRS v2 innovation package (additive; does not modify the EvoNav-faithful baseline).
+AMFRS package — multi-fidelity reward search (MAP-Elites, static gate, robustness).
 
-See AMFRS_V2_INNOVATION_ROADMAP.md and the execution plan for axes 1–5.
+Canonical entry: ``scripts/run_amfrs.py`` → ``AMFRSPipeline``.
 """
 
-from crowd_nav.reward_search.amfrs.config import AMFRS2RunConfig
-from crowd_nav.reward_search.amfrs.pipeline2 import AMFRS2Artifacts, AMFRS2Pipeline
+from crowd_nav.reward_search.amfrs.config import AMFRSRunConfig
+from crowd_nav.reward_search.amfrs.pipeline import AMFRSArtifacts, AMFRSPipeline
 
 __all__ = [
-    "AMFRS2Artifacts",
-    "AMFRS2Pipeline",
-    "AMFRS2RunConfig",
+    "AMFRSArtifacts",
+    "AMFRSPipeline",
+    "AMFRSRunConfig",
 ]

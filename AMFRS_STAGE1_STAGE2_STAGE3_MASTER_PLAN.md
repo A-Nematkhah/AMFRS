@@ -1,9 +1,24 @@
 # AMFRS / EvoNav Stage 1–2–3 Master Plan
 
-**Status:** Living reference — Phases 0–4 applied; **T6/T7 (Phase 2 deferred)** applied 2026-09-12. Next: Phase 5 (AMFRS-ready) after a validated higher-K3 run, or resolve D-2 empirically.  
-**Repo reality:** Project namespace is **AMFRS** (`amfrs_env/`). The runnable pipeline is still a faithful **EvoNav Algorithm 1** replication; novel AMFRS mechanisms (novelty archive, Pareto, adaptive controller) are **not implemented** (`pipeline.py` / `evolver.py` say so explicitly).  
-**Sources:** Code under `amfrs_env/crowd_nav/reward_search/` + prior Stage I/II/III analysis in project discussions.  
-**Last consolidated:** 2026-09-12 (T6 failure-mode D.3 + T7 selection weights v0)
+**Status (2026-09-15):** Historical reference for Phases 0–4 hardening work.  
+**Repo reality now:** There is a **single** AMFRS pipeline
+(`crowd_nav/reward_search/amfrs/` → `scripts/run_amfrs.py`). The dual-track
+“Algorithm 1 baseline vs AMFRS2” entry points were consolidated; the former
+Alg1 orchestrator in `reward_search/pipeline.py` was replaced by a re-export
+of the AMFRS package. Prefer `AMFRS_V2_INNOVATION_ROADMAP.md` for the live
+feature axes (names may still say “AMFRS2” in older sections).
+
+**Sources:** Code under `amfrs_env/crowd_nav/reward_search/`.  
+**Last consolidated:** 2026-09-12 (T6/T7); dual-path retired 2026-09-15.
+
+---
+
+## Archived content below
+
+The remainder of this file documents the former EvoNav Algorithm 1 layout and
+Phase 0–4 tasks. It is kept for thesis history; do not treat CLI names like
+`run_amfrs_paper_scale.py` as current entry points.
+
 
 Labels used throughout:
 

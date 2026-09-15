@@ -45,7 +45,7 @@ class TrainerContext:
     human_num: int = 20
     predict_method: str = "inferred"
     randomization_regime: str = "without_random"
-    output_root: str = "trained_models/amfrs2"
+    output_root: str = "trained_models/amfrs"
 
 
 class FidelityLadder:

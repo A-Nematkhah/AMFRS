@@ -80,6 +80,6 @@ class SandboxConfig:
     forbidden_names: Tuple[str, ...] = FORBIDDEN_NAME_IDS
     allow_while: bool = False
     allow_imports: bool = False
-    # Optional callables injected into the exec namespace (AMFRS2 primitives).
+    # Optional callables injected into the exec namespace (AMFRS primitives).
     # Default empty — baseline behavior unchanged when omitted.
     extra_namespace: Mapping[str, Any] = field(default_factory=dict)

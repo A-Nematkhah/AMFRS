@@ -69,14 +69,14 @@ def test_dmin_aware_reward_not_human_blind():
 
 
 def test_pipeline_hard_rejects_nan(tmp_path):
-    from crowd_nav.reward_search.amfrs import AMFRS2Pipeline, AMFRS2RunConfig
+    from crowd_nav.reward_search.amfrs import AMFRSPipeline, AMFRSRunConfig
     from crowd_nav.reward_search.amfrs.static_gate import StaticGate
     from crowd_nav.reward_search.evolver import RewardCandidate
 
-    cfg = AMFRS2RunConfig(output_dir=str(tmp_path / "g"))
+    cfg = AMFRSRunConfig(output_dir=str(tmp_path / "g"))
     cfg.apply_fast_profile()
     cfg.output_dir = str(tmp_path / "g")
-    pipe = AMFRS2Pipeline(cfg)
+    pipe = AMFRSPipeline(cfg)
 
     # Directly exercise gate path used by pipeline
     def nan_fn(state, memory):
