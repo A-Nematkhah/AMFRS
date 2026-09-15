@@ -1,5 +1,5 @@
 """
-Shared evaluation + JSON reporting for EvoNav Table 1 / Table 2.
+Shared evaluation + JSON reporting for baseline paper Table 1 / Table 2.
 
 Returns raw per-episode records (not just aggregates) so later AMFRS-style
 analyses can reuse the same baseline JSON without re-running.
@@ -12,12 +12,12 @@ import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 
+from crowd_nav.reward_search.selection import DEFAULT_SELECTION_WEIGHTS
 from crowd_nav.reward_search.stage2 import ProxyMetrics, pin_episode_human_count
 
 logger = logging.getLogger(__name__)
@@ -177,8 +177,89 @@ def write_json(path: str, payload: Dict[str, Any]) -> None:
         f.write("\n")
 
 
-def candidate_to_dict(cand) -> Dict[str, Any]:
+def rank_table(
+    scores_by_id: Mapping[str, float],
+) -> List[Dict[str, Any]]:
+    """Dense ranks (1=best) from a candidate_id → scalar map."""
+    ranked = sorted(
+        scores_by_id.items(),
+        key=lambda kv: float(kv[1]),
+        reverse=True,
+    )
+    return [
+        {"candidate_id": cid, "rank": i, "scalar": float(score)}
+        for i, (cid, score) in enumerate(ranked, start=1)
+    ]
+
+
+def spearman_rank_correlation(
+    ranks_a: Mapping[str, int],
+    ranks_b: Mapping[str, int],
+) -> Dict[str, Any]:
+    """
+    Spearman ρ over shared candidate IDs (Phase 4 / T13).
+
+    Returns ``{spearman, n, paired_ids}``. ``spearman`` is None when ``n < 2``.
+    """
+    shared = sorted(set(ranks_a) & set(ranks_b))
+    n = len(shared)
+    if n < 2:
+        return {"spearman": None, "n": n, "paired_ids": shared}
+    xs = np.asarray([float(ranks_a[i]) for i in shared], dtype=np.float64)
+    ys = np.asarray([float(ranks_b[i]) for i in shared], dtype=np.float64)
+    # Pearson on ranks == Spearman when ranks are dense without ties handling.
+    if float(np.std(xs)) < 1e-12 or float(np.std(ys)) < 1e-12:
+        rho = 0.0 if np.allclose(xs, ys) else 0.0
+        # Constant ranks → undefined; report 0.0 with note.
+        return {
+            "spearman": float(rho),
+            "n": n,
+            "paired_ids": shared,
+            "note": "degenerate_rank_variance",
+        }
+    rho = float(np.corrcoef(xs, ys)[0, 1])
+    if not np.isfinite(rho):
+        rho = 0.0
+    return {"spearman": rho, "n": n, "paired_ids": shared}
+
+
+def stage2_stage3_calibration(
+    stage2_scores: Mapping[str, float],
+    stage3_scores: Mapping[str, float],
+    *,
+    stage2_best_id: Optional[str] = None,
+    stage3_best_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build II↔III rank calibration payload for ``stage2_stage3_calibration.json``.
+    """
+    table2 = rank_table(stage2_scores)
+    table3 = rank_table(stage3_scores)
+    ranks2 = {row["candidate_id"]: int(row["rank"]) for row in table2}
+    ranks3 = {row["candidate_id"]: int(row["rank"]) for row in table3}
+    corr = spearman_rank_correlation(ranks2, ranks3)
     return {
+        "stage2_ranking": table2,
+        "stage3_ranking": table3,
+        "correlation": corr,
+        "stage2_best_id": stage2_best_id,
+        "stage3_best_id": stage3_best_id,
+        "winner_match": (
+            stage2_best_id is not None
+            and stage3_best_id is not None
+            and str(stage2_best_id) == str(stage3_best_id)
+        ),
+        "scalar_definition": (
+            "w_sr*SR - w_cr*CR - w_tr*TR - w_itr*ITR + w_sd*SD "
+            "(selection.DEFAULT_SELECTION_WEIGHTS / D-3 T7)"
+        ),
+        "selection_weights": DEFAULT_SELECTION_WEIGHTS.to_dict(),
+    }
+
+
+def candidate_to_dict(cand) -> Dict[str, Any]:
+    md = dict(cand.metadata or {})
+    out: Dict[str, Any] = {
         "candidate_id": cand.candidate_id,
         "code": cand.code,
         "score": cand.score,
@@ -186,8 +267,38 @@ def candidate_to_dict(cand) -> Dict[str, Any]:
         "origin": cand.origin,
         "parent_ids": list(cand.parent_ids),
         "validation_error": cand.validation_error,
-        "metadata": dict(cand.metadata or {}),
+        "metadata": md,
     }
+    # Phase 3 / T10 — explicit evaluated vs proposed-refined genomes.
+    out["evaluated_genome"] = {
+        "candidate_id": md.get("evaluated_genome_id")
+        or (cand.candidate_id if md.get("trained_snapshot") else md.get("parent_id")),
+        "code": md.get("evaluated_genome_code")
+        or (cand.code if md.get("trained_snapshot") else None),
+        "metrics": md.get("last_metrics") or md.get("parent_metrics"),
+        "checkpoint_path": md.get("checkpoint_path") or md.get("parent_checkpoint_path"),
+    }
+    proposed = None
+    if md.get("refine_rejected_metric"):
+        proposed = {
+            "candidate_id": md.get("refine_proposed_id"),
+            "code": md.get("proposed_refined_genome_code"),
+            "accepted": False,
+            "verify_scalar": md.get("refine_verify_scalar"),
+            "parent_verify_scalar": md.get("parent_verify_scalar"),
+        }
+    elif md.get("refine_accepted") is True or (
+        cand.origin == "refinement" and not md.get("refine_kept_previous")
+    ):
+        proposed = {
+            "candidate_id": cand.candidate_id,
+            "code": cand.code,
+            "accepted": md.get("refine_accepted", True),
+            "verify_scalar": md.get("refine_verify_scalar"),
+            "parent_verify_scalar": md.get("parent_verify_scalar"),
+        }
+    out["proposed_refined_genome"] = proposed
+    return out
 
 
 def load_candidate_dict(d: Dict[str, Any]):
@@ -321,6 +432,9 @@ def evaluate_saved_model(
     torch_device = torch.device(
         "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
     )
+    # Keep GST pretext wrapper buffers on the same device as Policy / obs.
+    if hasattr(env_config, "training"):
+        env_config.training.device = str(torch_device)
     torch.manual_seed(seed)
 
     envs = make_vec_envs(
@@ -354,7 +468,9 @@ def evaluate_saved_model(
         )
         actor_critic.load_state_dict(torch.load(load_path, map_location=torch_device))
         actor_critic.base.nenv = 1
-        nn.DataParallel(actor_critic).to(torch_device)
+        # Avoid DataParallel for single-env eval (device mismatch with GST wrappers).
+        actor_critic.to(torch_device)
+        actor_critic.eval()
 
     episodes = _rollout_episodes(
         actor_critic,

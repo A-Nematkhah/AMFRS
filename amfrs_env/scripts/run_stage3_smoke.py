@@ -9,7 +9,7 @@ Paper K3 = 1e7; this smoke uses a tiny budget. Scale up on a GPU cluster::
 
     python scripts/run_stage3_smoke.py --train-env-steps 10000000 --eval-episodes 500
 
-Example (from ``evonav_env/`` with the project venv active)::
+Example (from ``amfrs_env/`` with the project venv active)::
 
     python scripts/run_stage3_smoke.py --no-refine
     python scripts/run_stage3_smoke.py --train-env-steps 200 --eval-episodes 1 --h-sweep 5,10

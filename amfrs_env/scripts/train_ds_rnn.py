@@ -3,7 +3,7 @@
 Train DS-RNN Table 1 baselines (Option A).
 
 Uses this repo's ``srnn`` policy + ``--algo ppo`` for the same env-step budget
-as EvoNav Stage III (``STAGE3_STEPS`` by default; ``--paper-steps`` → 1e7).
+as AMFRS Stage III (``STAGE3_STEPS`` by default; ``--paper-steps`` → 1e7).
 
 Writes::
 

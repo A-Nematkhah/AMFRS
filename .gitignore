@@ -1,19 +1,19 @@
 # Secrets and local config
-evonav_env/groq_keys.json
-evonav_env/.local_key_config.md
+amfrs_env/groq_keys.json
+amfrs_env/.local_key_config.md
 .env
 .env.*
 
 # Virtual environments
-evonav_env/.venv/
-evonav_env/venv/
+amfrs_env/.venv/
+amfrs_env/venv/
 **/.venv/
 
 # Local run artifacts
-evonav_env/results/
-evonav_env/data/stage1_dataset/
-evonav_env/.pip_cache/
-evonav_env/.tmp/
+amfrs_env/results/
+amfrs_env/data/stage1_dataset/
+amfrs_env/.pip_cache/
+amfrs_env/.tmp/
 
 # Checkpoints / TensorBoard (never commit weights or event streams)
 *.pt

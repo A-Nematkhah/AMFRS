@@ -1,7 +1,7 @@
 """
 Paper-scale multi-seed Algorithm 1 orchestration.
 
-Only invoked by ``scripts/run_evonav_paper_scale.py`` (never by pytest).
+Only invoked by ``scripts/run_amfrs_paper_scale.py`` (never by pytest).
 Aggregates final-policy metrics as mean±std **across seeds**, with explicit
 methodology text when the paper omits its seed count.
 """
@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from crowd_nav.reward_search.checkpointing import CheckpointStore, CostLogger, Timer
-from crowd_nav.reward_search.pipeline import EvoNavPipeline, EvoNavRunConfig
+from crowd_nav.reward_search.pipeline import AMFRSPipeline, AMFRSRunConfig
 from crowd_nav.reward_search.presets import (
     PaperScaleSpec,
     apply_paper_scale,
@@ -50,10 +50,6 @@ def extract_final_metrics(seed_dir: str) -> Dict[str, float]:
             pop = json.load(f)
         hist = pop.get("history") or []
         if hist:
-            last_round = max(int(h.get("round_index", -1)) for h in hist)
-            rows = [
-                h for h in hist if int(h.get("round_index", -1)) == last_round
-            ]
 
             def _score(h: Dict[str, Any]) -> float:
                 m = h.get("metrics") or {}
@@ -61,7 +57,8 @@ def extract_final_metrics(seed_dir: str) -> Dict[str, float]:
                     m.get("SR", 0) - m.get("CR", 0) - 0.5 * m.get("TR", 0)
                 )
 
-            best = max(rows, key=_score)
+            # Best-ever across all rounds (not last-round only).
+            best = max(hist, key=_score)
             m = best.get("metrics") or {}
             return {k: float(m[k]) for k in _METRIC_KEYS if k in m}
 
@@ -192,9 +189,9 @@ class PaperScaleRunner:
             device=self.device,
         )
 
-    def _config_for_seed(self, seed: int) -> EvoNavRunConfig:
+    def _config_for_seed(self, seed: int) -> AMFRSRunConfig:
         seed_dir = os.path.join(self.output_dir, f"seed_{int(seed):04d}")
-        cfg = EvoNavRunConfig(output_dir=seed_dir, seed=int(seed))
+        cfg = AMFRSRunConfig(output_dir=seed_dir, seed=int(seed))
         apply_paper_scale(cfg, self.spec)
         cfg.seed = int(seed)
         cfg.device = self.device
@@ -218,7 +215,7 @@ class PaperScaleRunner:
 
         cfg = self._config_for_seed(seed)
         timer = Timer()
-        pipeline = EvoNavPipeline(cfg, checkpoint_store=self.store)
+        pipeline = AMFRSPipeline(cfg, checkpoint_store=self.store)
         logger.info(
             "Paper-scale seed=%s → %s (K2=%d G2=%d K3=%d G3=%d)",
             seed,

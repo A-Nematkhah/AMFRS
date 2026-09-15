@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from crowd_nav.reward_search.evolver import RewardCandidate
 from crowd_nav.reward_search.llm import ScriptedLLMClient
 from crowd_nav.reward_search.sandbox import RewardValidator
@@ -63,7 +65,7 @@ def test_proxy_metrics_feedback_is_raw_not_rankings():
     text = m.feedback_text()
     assert "SR=0.8000" in text
     assert "rank" not in text.lower()
-    assert set(m.as_dict()) == {"SR", "CR", "TR", "NT", "PL", "ITR", "SD"}
+    assert {"SR", "CR", "TR", "NT", "PL", "ITR", "SD", "n_seeds"} <= set(m.as_dict())
 
 
 def test_stub_trainer_is_deterministic():
@@ -88,15 +90,37 @@ def test_stage2_run_refines_to_v2_with_stub():
             train_env_steps=8,
             eval_episodes=2,
             horizon_steps=5,
+            protect_elite_refine=False,
         ),
     )
     out = runner.run(pop)
     assert len(out) == n
-    assert all(c.candidate_id.endswith("_v2") for c in out)
-    assert all(c.origin == "refinement" for c in out)
+    assert runner.best_trained is not None
     assert len(runner.history) == n
-    assert all(r.refined and not r.kept_previous for r in runner.history)
+    # With elitism, best-ever genome may be re-injected without a _v2 id.
+    assert any(r.refined and not r.kept_previous for r in runner.history)
+    assert any(c.candidate_id.endswith("_v2") or c.origin == "refinement" for c in out)
     assert runner.validation_failures == []
+
+
+def test_stage2_protects_elite_from_refine():
+    n = 2
+    pop = _make_population(n)
+    client = ScriptedLLMClient([_valid_code(99.0), _valid_code(100.0)])
+    runner = Stage2Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage2Config(
+            population_size=n,
+            rounds=1,
+            protect_elite_refine=True,
+        ),
+    )
+    out = runner.run(pop)
+    assert runner.best_trained is not None
+    assert any((c.metadata or {}).get("refine_skipped_elite") for c in out)
+    # Elite genome is preserved for final selection even if later rounds degrade.
+    assert (runner.best_trained.metadata or {}).get("trained_snapshot") is True
 
 
 def test_failed_refinement_keeps_previous_and_logs(caplog):
@@ -105,7 +129,9 @@ def test_failed_refinement_keeps_previous_and_logs(caplog):
     runner = Stage2Runner(
         client,
         StubPolicyTrainer(),
-        config=Stage2Config(population_size=1, rounds=1),
+        config=Stage2Config(
+            population_size=1, rounds=1, protect_elite_refine=False
+        ),
     )
     with caplog.at_level(logging.WARNING):
         out = runner.run(pop)
@@ -130,7 +156,9 @@ def test_llm_error_keeps_previous():
     runner = Stage2Runner(
         BoomClient(),  # type: ignore[arg-type]
         StubPolicyTrainer(),
-        config=Stage2Config(population_size=1, rounds=1),
+        config=Stage2Config(
+            population_size=1, rounds=1, protect_elite_refine=False
+        ),
     )
     out = runner.run(pop)
     assert out[0].candidate_id == "c0"
@@ -147,11 +175,14 @@ def test_table5_defaults():
     cfg = Stage2Config()
     assert cfg.population_size == 8
     assert cfg.rounds == 16
-    assert cfg.train_env_steps == 8000
+    # Practical default raised for reward ranking; paper K2=8000 via paper_scale.
+    assert cfg.train_env_steps == 50_000
     assert cfg.eval_episodes == 50
     assert cfg.horizon_steps == 100
     assert cfg.algo == "a2c"
     assert cfg.num_processes is None  # resolved at train time
+    assert cfg.n_eval_seeds == 2
+    assert cfg.accept_reject_refine is True
 
 
 def test_stage2_argv_resolves_auto_num_processes():
@@ -177,3 +208,141 @@ def test_stage2_a2c_forces_num_mini_batch_one():
     cfg = Stage2Config(algo="a2c", num_processes=4, num_mini_batch=None)
     argv = _stage2_train_argv(cfg, "c0", 0)
     assert int(argv[argv.index("--num-mini-batch") + 1]) == 1
+
+
+def test_stage2_argv_includes_seed_in_output_dir():
+    from crowd_nav.reward_search.stage2 import _stage2_train_argv
+
+    cfg = Stage2Config(seed=425, output_root="trained_models/stage2")
+    argv = _stage2_train_argv(cfg, "c0", 3)
+    out = argv[argv.index("--output_dir") + 1]
+    assert out.endswith("r03_c0_seed425") or out.replace("\\", "/").endswith(
+        "r03_c0_seed425"
+    )
+
+
+def test_accept_reject_compares_fair_verify_budget():
+    """Parent and proposed are both verified; metadata marks fair budget."""
+    pop = _make_population(2)
+    client = ScriptedLLMClient([_valid_code(18.0), _valid_code(19.0)])
+    runner = Stage2Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage2Config(
+            population_size=2,
+            rounds=1,
+            n_eval_seeds=1,
+            protect_elite_refine=False,
+            accept_reject_refine=True,
+        ),
+    )
+    out = runner.run(pop)
+    accepted = [c for c in out if (c.metadata or {}).get("refine_accepted")]
+    assert accepted
+    md = accepted[0].metadata or {}
+    assert md.get("accept_reject_fair_budget") is True
+    assert "parent_verify_scalar" in md
+    assert "refine_verify_scalar" in md
+
+
+def test_train_eval_multiseed_uses_n_seeds():
+    from crowd_nav.reward_search.stage2 import train_eval_multiseed
+
+    pop = _make_population(1)
+    trainer = StubPolicyTrainer()
+    cfg = Stage2Config(population_size=1, n_eval_seeds=3, seed=10)
+    metrics = train_eval_multiseed(
+        trainer, pop[0], round_index=0, config=cfg
+    )
+    assert metrics.n_seeds == 3
+    assert metrics.metric_std is not None
+
+
+def test_accept_reject_keeps_better_refine():
+    # Two candidates so elite inject does not wipe the only slot.
+    pop = _make_population(2)  # c0→0.0, c1→1.0
+    client = ScriptedLLMClient([_valid_code(18.0), _valid_code(19.0)])
+    runner = Stage2Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage2Config(
+            population_size=2,
+            rounds=1,
+            n_eval_seeds=1,
+            protect_elite_refine=False,
+            accept_reject_refine=True,
+        ),
+    )
+    out = runner.run(pop)
+    assert any(c.candidate_id.endswith("_v2") for c in out)
+    assert any((c.metadata or {}).get("refine_accepted") for c in out)
+    assert any(r.refine_accepted is True and r.refined for r in runner.history)
+
+
+def test_accept_reject_rejects_worse_refine():
+    validator = RewardValidator()
+    strong_code = "def compute_reward(state, memory):\n    return float(18.0)\n"
+    weak_code = "def compute_reward(state, memory):\n    return float(1.0)\n"
+    strong_fn, err = validator.try_validate(strong_code)
+    weak_fn, err2 = validator.try_validate(weak_code)
+    assert strong_fn is not None and weak_fn is not None, (err, err2)
+    pop = [
+        RewardCandidate(
+            candidate_id="strong",
+            code=strong_code,
+            reward_fn=strong_fn,
+            valid=True,
+            origin="initial",
+        ),
+        RewardCandidate(
+            candidate_id="weak",
+            code=weak_code,
+            reward_fn=weak_fn,
+            valid=True,
+            origin="initial",
+        ),
+    ]
+    # First LLM reply worsens strong; second improves weak (unused for reject assert).
+    client = ScriptedLLMClient([_valid_code(0.0), _valid_code(16.0)])
+    runner = Stage2Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage2Config(
+            population_size=2,
+            rounds=1,
+            n_eval_seeds=1,
+            protect_elite_refine=False,
+            accept_reject_refine=True,
+        ),
+    )
+    out = runner.run(pop)
+    by_id = {c.candidate_id: c for c in out}
+    # Strong genome kept (metric reject); may still be present under same id.
+    assert any(
+        "return float(18.0)" in c.code
+        and (c.metadata or {}).get("refine_rejected_metric")
+        for c in out
+    ) or any(f.get("reason") == "metric_reject" for f in runner.validation_failures)
+    assert any(r.refine_accepted is False and r.kept_previous for r in runner.history)
+    assert any(f.get("reason") == "metric_reject" for f in runner.validation_failures)
+    del by_id  # silence unused if elite reshuffles ids
+
+
+def test_accept_reject_disabled_keeps_sandbox_ok_even_if_worse():
+    pop = _make_population(2)
+    # Both refined to low constants; without metric gate they still become *_v2.
+    client = ScriptedLLMClient([_valid_code(0.0), _valid_code(0.0)])
+    runner = Stage2Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage2Config(
+            population_size=2,
+            rounds=1,
+            n_eval_seeds=1,
+            protect_elite_refine=False,
+            accept_reject_refine=False,
+        ),
+    )
+    out = runner.run(pop)
+    assert any(c.candidate_id.endswith("_v2") for c in out)
+    assert any(r.refined and not r.kept_previous for r in runner.history)

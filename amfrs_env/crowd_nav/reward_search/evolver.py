@@ -1,5 +1,5 @@
 """
-EvoNav Stage I evolutionary loop (analytical Score1).
+AMFRS Stage I evolutionary loop (analytical Score1).
 
 Population N=8, G1=10 generations. Each generation:
   1. Score candidates via ``score1_for_dataset`` (injected / Phase 2).
@@ -40,6 +40,7 @@ from crowd_nav.reward_search.prompts import (
 from crowd_nav.reward_search.rejection_log import categorize_validation_error
 from crowd_nav.reward_search.sandbox import RewardSandboxError, RewardValidator
 from crowd_nav.reward_search.sandbox.runtime import SandboxedReward
+from crowd_nav.reward_search.scoring import Score1Report, format_score1_diagnostics
 from crowd_nav.reward_search.state import RewardFunction
 
 logger = logging.getLogger(__name__)
@@ -445,11 +446,9 @@ class StageIEvolver:
                 )
                 continue
             try:
-                value = float(
-                    self.score_fn(
-                        cand.as_reward_function(),
-                        candidate_id=cand.candidate_id,
-                    )
+                raw = self.score_fn(
+                    cand.as_reward_function(),
+                    candidate_id=cand.candidate_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 console.fail(
@@ -457,7 +456,13 @@ class StageIEvolver:
                     stage="Stage I",
                 )
                 raise
-            scored.append(replace(cand, score=value))
+            md = dict(cand.metadata or {})
+            if isinstance(raw, Score1Report):
+                value = float(raw.score)
+                md["score1_report"] = raw.to_dict()
+            else:
+                value = float(raw)
+            scored.append(replace(cand, score=value, metadata=md))
         scored.sort(
             key=lambda c: float("-inf") if c.score is None else float(c.score),
             reverse=True,
@@ -500,9 +505,15 @@ class StageIEvolver:
         phase: str,
         attempt: int,
     ) -> RewardCandidate:
+        diag = format_score1_diagnostics((parent.metadata or {}).get("score1_report"))
+        diag_clause = (
+            f" Score1 diagnostics: {diag}."
+            if diag
+            else " Weakness focus: improve analytical Score1 relative to elites."
+        )
         weakness = (
-            f"Parent {parent.candidate_id} score={parent.score}. "
-            f"Weakness focus: improve analytical Score1 relative to elites. "
+            f"Parent {parent.candidate_id} score={parent.score}."
+            f"{diag_clause} "
             f"Global reflection: {reflection}"
         )
         prompt = format_d2_mutation(
@@ -666,7 +677,7 @@ class StageIEvolver:
         return next_pop
 
     def _build_reflection(self, ranked: Sequence[RewardCandidate]) -> str:
-        """Short reflective note (Section 4.2) for the next generation's prompts."""
+        """Short reflective note (Section 4.2) with Score1 diagnostics when present."""
         lines = []
         best = ranked[0]
         worst = ranked[-1]
@@ -674,7 +685,6 @@ class StageIEvolver:
             f"Best={best.candidate_id} score={best.score}; "
             f"Worst={worst.candidate_id} score={worst.score}."
         )
-        # Summarize lower half weaknesses for mutation guidance.
         lower = ranked[len(ranked) // 2 :]
         if lower:
             ids = ", ".join(c.candidate_id for c in lower[:3])
@@ -682,6 +692,12 @@ class StageIEvolver:
                 f"Lower performers ({ids}) should strengthen goal progress and "
                 f"collision/discomfort penalties while keeping dense shaping."
             )
+            for cand in lower[:3]:
+                diag = format_score1_diagnostics(
+                    (cand.metadata or {}).get("score1_report")
+                )
+                if diag:
+                    lines.append(f"{cand.candidate_id} diagnostics: {diag}.")
         lines.append(
             "Prefer combining elite safety terms with efficient progress shaping; "
             "avoid near-constant rewards."

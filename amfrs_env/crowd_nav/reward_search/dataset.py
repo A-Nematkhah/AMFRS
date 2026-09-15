@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -311,3 +312,57 @@ def build_synthetic_scenario(
         else:
             out.append(t)
     return out
+
+
+def split_stage1_dataset(
+    dataset: Stage1Dataset,
+    *,
+    holdout_fraction: float = 0.2,
+    seed: int = 0,
+) -> Tuple[Stage1Dataset, Stage1Dataset, Dict[str, Any]]:
+    """
+    Deterministic train / holdout split over scenario ids (Phase 1 / S1-1).
+
+    Holdout is empty when there is only one scenario or ``holdout_fraction<=0``.
+    At least one train scenario is always kept when the dataset is non-empty.
+    """
+    if not dataset:
+        raise ValueError("Cannot split an empty Stage I dataset")
+    frac = float(holdout_fraction)
+    if frac < 0.0 or frac >= 1.0:
+        raise ValueError(f"holdout_fraction must be in [0, 1); got {holdout_fraction!r}")
+
+    ids = sorted(dataset.keys())
+    n = len(ids)
+    if n == 1 or frac == 0.0:
+        meta = {
+            "holdout_fraction": frac,
+            "seed": int(seed),
+            "n_train_scenarios": n,
+            "n_holdout_scenarios": 0,
+            "train_scenario_ids": list(ids),
+            "holdout_scenario_ids": [],
+        }
+        return dict(dataset), {}, meta
+
+    n_hold = int(round(n * frac))
+    n_hold = max(1, min(n_hold, n - 1))
+
+    rng = random.Random(int(seed))
+    shuffled = list(ids)
+    rng.shuffle(shuffled)
+    hold_ids = set(shuffled[:n_hold])
+    train_ids = [i for i in ids if i not in hold_ids]
+    holdout_ids = [i for i in ids if i in hold_ids]
+
+    train = {i: list(dataset[i]) for i in train_ids}
+    holdout = {i: list(dataset[i]) for i in holdout_ids}
+    meta = {
+        "holdout_fraction": frac,
+        "seed": int(seed),
+        "n_train_scenarios": len(train),
+        "n_holdout_scenarios": len(holdout),
+        "train_scenario_ids": train_ids,
+        "holdout_scenario_ids": holdout_ids,
+    }
+    return train, holdout, meta

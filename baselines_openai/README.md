@@ -1,12 +1,12 @@
 # Vendored OpenAI Baselines (trimmed)
 
 This tree is a **trimmed** copy of [OpenAI Baselines](https://github.com/openai/baselines)
-(MIT — see `LICENSE` / `NOTICE.md`), vendored so EvoNav can
+(MIT — see `LICENSE` / `NOTICE.md`), vendored so AMFRS can
 `pip install -e ../baselines_openai` without a git submodule.
 
 ## What remains
 
-EvoNav only needs:
+AMFRS only needs:
 
 - `baselines.logger`
 - `baselines.bench`
@@ -15,8 +15,8 @@ EvoNav only needs:
 
 Upstream algorithm packages (`a2c`, `ppo1`/`ppo2`, `deepq`, `ddpg`, `her`,
 `gail`, `trpo_mpi`, `acer`, `acktr`), demo assets, Docker/CI configs, and
-the `baselines.run` CLI were removed from this fork. EvoNav's own PPO/A2C live
-under `evonav_env/rl/{ppo,a2c}`.
+the `baselines.run` CLI were removed from this fork. AMFRS's own PPO/A2C live
+under `amfrs_env/rl/{ppo,a2c}`.
 
 ## Install
 

@@ -1,5 +1,5 @@
 """
-Named run presets for EvoNav Algorithm 1.
+Named run presets for AMFRS Algorithm 1.
 
 ``fast`` — stub trainers, tiny budgets (pytest / smoke).
 ``paper`` — Tables 3–6 budgets (K2=8000, G2=16, K3=1e7, …). Only apply via
@@ -36,12 +36,12 @@ PAPER_DEFAULT_SEEDS = (425, 426, 427, 428, 429)
 PAPER_SCALE_YAML = os.path.join("configs", "paper_scale.yaml")
 
 METHODOLOGY_SEED_NOTE = (
-    "The EvoNav paper does not state how many random seeds Table 1's "
-    "mean±std bars used. This report uses {n_seeds} independent full "
-    "Algorithm-1 runs (seeds={seeds}) and aggregates final-policy metrics "
-    "as mean±std across seeds — not across evaluation episodes within a "
-    "single seed, which is a smaller variance source than the paper's "
-    "reported bars."
+    "The baseline paper (EvoNav, arXiv:2605.11859) does not state how many "
+    "random seeds Table 1's mean±std bars used. This report uses {n_seeds} "
+    "independent full Algorithm-1 runs (seeds={seeds}) and aggregates "
+    "final-policy metrics as mean±std across seeds — not across evaluation "
+    "episodes within a single seed, which is a smaller variance source than "
+    "the paper's reported bars."
 )
 
 
@@ -173,7 +173,7 @@ def load_paper_scale_yaml(path: Optional[str] = None) -> PaperScaleSpec:
 
 def apply_paper_scale(config: Any, spec: Optional[PaperScaleSpec] = None) -> Any:
     """
-    Mutate an ``EvoNavRunConfig`` to paper Tables 3–6 budgets.
+    Mutate an ``AMFRSRunConfig`` to paper Tables 3–6 budgets.
 
     Does **not** enable stubs. Distinct from ``apply_fast_profile``.
     """

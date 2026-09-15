@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 
-from crowd_nav.reward_search.pipeline import EvoNavPipeline, EvoNavRunConfig
+from crowd_nav.reward_search.pipeline import AMFRSPipeline, AMFRSRunConfig
 from crowd_nav.reward_search.reporting import (
     EpisodeRecord,
     format_table2_row,
@@ -14,6 +14,21 @@ from crowd_nav.reward_search.reporting import (
 )
 from crowd_nav.reward_search.scoring import make_smoke_score_fn
 from crowd_nav.reward_search.state import LegacyReward
+
+
+def test_resolve_h_sweep_counts_custom_and_clip():
+    assert AMFRSPipeline.resolve_h_sweep_counts(
+        7, requested=(3, 5, 7)
+    ) == (3, 5, 7)
+    # Values above train H are dropped.
+    assert AMFRSPipeline.resolve_h_sweep_counts(
+        7, requested=(3, 5, 7, 20)
+    ) == (3, 5, 7)
+    assert AMFRSPipeline.resolve_h_sweep_counts(20) == (5, 10, 15, 20)
+    assert AMFRSPipeline.resolve_h_sweep_counts(7) == (5, 7)
+    assert AMFRSPipeline.resolve_h_sweep_counts(
+        7, run_h_sweep=False
+    ) == (7,)
 
 
 def test_smoke_score_fn_finite():
@@ -62,9 +77,9 @@ def test_summarize_episodes_mean_std():
 
 def test_pipeline_fast(tmp_path):
     out = tmp_path / "run"
-    cfg = EvoNavRunConfig(output_dir=str(out))
+    cfg = AMFRSRunConfig(output_dir=str(out))
     cfg.apply_fast_profile()
-    arts = EvoNavPipeline(cfg).run()
+    arts = AMFRSPipeline(cfg).run()
     assert arts.best_stage1 is not None
     assert arts.best_stage2 is not None
     assert arts.best_stage3 is not None
@@ -76,12 +91,17 @@ def test_pipeline_fast(tmp_path):
         "stage1_population.json",
         "stage2_population.json",
         "stage3_population.json",
+        "stage3_finalists.json",
         "seed_reward.py",
     ):
         assert (out / name).is_file(), name
+    finalists = json.loads((out / "stage3_finalists.json").read_text(encoding="utf-8"))
+    assert len(finalists["finalists"]) <= cfg.stage3_max_finalists
     final = json.loads((out / "final_candidate.json").read_text(encoding="utf-8"))
     assert "compute_reward" in final["code"]
     assert final["valid"] is True
+    assert "evaluated_genome" in final
+    assert "proposed_refined_genome" in final
 
 
 def test_write_json_roundtrip(tmp_path):

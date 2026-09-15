@@ -1,5 +1,5 @@
 """
-EvoNav Appendix D prompt templates (arXiv:2605.11859).
+Baseline paper (EvoNav) Appendix D prompt templates (arXiv:2605.11859).
 
 Ported from Appendix D.1–D.5, with intentional adaptations for this fork:
 - Signature is ``compute_reward(state, memory)`` over our ``RewardState``

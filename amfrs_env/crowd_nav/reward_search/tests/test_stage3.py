@@ -113,13 +113,20 @@ def test_stage3_run_refines_to_v3_and_h_sweep():
             train_env_steps=100,
             eval_episodes=2,
             human_counts=(5, 10, 20),
+            protect_elite_refine=False,
+            accept_reject_refine=True,
+            h_sweep_max_finalists=2,
         ),
     )
     out = runner.run(pop, run_h_sweep=True)
     assert len(out) == n
-    assert all(c.candidate_id.endswith("_v3") for c in out)
+    assert runner.best_trained is not None
     assert len(runner.history) == n
-    assert len(runner.sweep_reports) == n
+    assert any(r.refined and not r.kept_previous for r in runner.history)
+    # H-sweep runs on up to h_sweep_max_finalists unique genomes.
+    assert 1 <= len(runner.sweep_reports) <= 2
+    assert runner.best_h_aware is not None
+    assert (runner.best_h_aware.metadata or {}).get("h_aware_selected") is True
     for report in runner.sweep_reports:
         assert set(report.by_human_count) == {5, 10, 20}
         table = report.summary_table()
@@ -136,7 +143,12 @@ def test_failed_refinement_keeps_previous(caplog):
     runner = Stage3Runner(
         client,
         StubPolicyTrainer(),
-        config=Stage3Config(population_size=1, rounds=1, human_counts=(5,)),
+        config=Stage3Config(
+            population_size=1,
+            rounds=1,
+            human_counts=(5,),
+            protect_elite_refine=False,
+        ),
     )
     with caplog.at_level(logging.WARNING):
         out = runner.run(pop, run_h_sweep=True)
@@ -144,6 +156,117 @@ def test_failed_refinement_keeps_previous(caplog):
     assert out[0].metadata.get("refine_kept_previous") is True
     assert runner.history[0].kept_previous
     assert len(runner.sweep_reports) == 1
+
+
+def test_stage3_skip_refine_on_last_round_when_g3_gt_1():
+    pop = _make_population(2)
+    # Round 0: two refines; round 1 (last): no LLM calls.
+    client = ScriptedLLMClient([_valid_code(12.0), _valid_code(13.0)])
+    runner = Stage3Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage3Config(
+            population_size=2,
+            rounds=2,
+            train_env_steps=50,
+            human_counts=(5,),
+            protect_elite_refine=False,
+            skip_refine_last_round=True,
+            accept_reject_refine=True,
+        ),
+    )
+    out = runner.run(pop, run_h_sweep=False)
+    last_round = [r for r in runner.history if r.round_index == 1]
+    assert len(last_round) == 2
+    assert all(r.kept_previous for r in last_round)
+    assert client.remaining == 0  # both scripted replies consumed in round 0 only
+    assert any(
+        (c.metadata or {}).get("refine_skipped_last_round") for c in out
+    )
+
+
+def test_stage3_accept_reject_rejects_worse_refine():
+    validator = RewardValidator()
+    strong_code = "def compute_reward(state, memory):\n    return float(18.0)\n"
+    weak_code = "def compute_reward(state, memory):\n    return float(1.0)\n"
+    fn, err = validator.try_validate(strong_code)
+    assert fn is not None, err
+    pop = [
+        RewardCandidate(
+            candidate_id="strong",
+            code=strong_code,
+            reward_fn=fn,
+            valid=True,
+            origin="initial",
+        ),
+        RewardCandidate(
+            candidate_id="other",
+            code=weak_code,
+            reward_fn=validator.try_validate(weak_code)[0],
+            valid=True,
+            origin="initial",
+        ),
+    ]
+    # First candidate gets a worse refine; second gets a mild refine.
+    client = ScriptedLLMClient([_valid_code(1.0), _valid_code(2.0)])
+    runner = Stage3Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage3Config(
+            population_size=2,
+            rounds=1,
+            human_counts=(5,),
+            protect_elite_refine=False,
+            accept_reject_refine=True,
+        ),
+    )
+    runner.run(pop, run_h_sweep=False)
+    assert any(f.get("reason") == "metric_reject" for f in runner.validation_failures)
+
+
+def test_stage3_accept_reject_keeps_better_refine():
+    pop = _make_population(2)  # c0→0.0, c1→1.0
+    client = ScriptedLLMClient([_valid_code(18.0), _valid_code(19.0)])
+    runner = Stage3Runner(
+        client,
+        StubPolicyTrainer(),
+        config=Stage3Config(
+            population_size=2,
+            rounds=1,
+            human_counts=(5,),
+            protect_elite_refine=False,
+            accept_reject_refine=True,
+        ),
+    )
+    out = runner.run(pop, run_h_sweep=False)
+    assert any(c.candidate_id.endswith("_v3") for c in out)
+    assert any((c.metadata or {}).get("refine_accepted") for c in out)
+
+
+def test_candidate_to_dict_genome_clarity():
+    from crowd_nav.reward_search.reporting import candidate_to_dict
+
+    cand = RewardCandidate(
+        candidate_id="parent_v3",
+        code="def compute_reward(state, memory):\n    return float(9.0)\n",
+        origin="refinement",
+        metadata={
+            "trained_snapshot": True,
+            "evaluated_genome_id": "parent",
+            "evaluated_genome_code": (
+                "def compute_reward(state, memory):\n    return float(1.0)\n"
+            ),
+            "last_metrics": {"SR": 0.5, "CR": 0.1, "TR": 0.1},
+            "refine_accepted": True,
+            "refine_verify_scalar": 0.4,
+            "parent_verify_scalar": 0.3,
+        },
+    )
+    d = candidate_to_dict(cand)
+    assert d["evaluated_genome"]["candidate_id"] == "parent"
+    assert "float(1.0)" in d["evaluated_genome"]["code"]
+    assert d["proposed_refined_genome"]["accepted"] is True
+    assert d["proposed_refined_genome"]["candidate_id"] == "parent_v3"
 
 
 def test_v3_id_helper():

@@ -1,5 +1,5 @@
 """
-EvoNav Stage II — lightweight proxy A2C rollouts + D.3 LLM refinement.
+AMFRS Stage II — lightweight proxy A2C rollouts + D.3 LLM refinement.
 
 For each of N Stage-I candidates, each of G2 rounds:
   1. Train a FRESH A2C policy for fixed K2 env steps (Table 5: 8000).
@@ -43,9 +43,22 @@ from crowd_nav.reward_search.parallelism import (
 from crowd_nav.reward_search.prompts import (
     D3_SYSTEM_PROMPT,
     format_d3_refinement,
-    format_d3_repair,
+)
+from crowd_nav.reward_search.diagnostics import failure_mode_summary
+from crowd_nav.reward_search.refine_harness import (
+    build_accept_metadata,
+    build_metric_reject_failure,
+    build_reject_metadata,
+    decide_accept_reject,
+    repair_invalid_code,
+    resolve_verify_train_steps,
 )
 from crowd_nav.reward_search.sandbox import RewardValidator
+from crowd_nav.reward_search.selection import (
+    candidate_nav_scalar,
+    is_same_genome,
+    navigation_scalar,
+)
 from crowd_nav.reward_search.state import RewardFunction
 
 logger = logging.getLogger(__name__)
@@ -58,11 +71,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Stage2Config:
-    """EvoNav Table 5 Stage II defaults."""
+    """Baseline paper (EvoNav) Table 5 Stage II defaults."""
 
     population_size: int = 8
     rounds: int = 16  # G2
-    train_env_steps: int = 8000  # K2
+    train_env_steps: int = 50_000  # practical default; paper Table 5 K2=8000
     eval_episodes: int = 50  # E2
     horizon_steps: int = 100  # T_short
     algo: str = "a2c"
@@ -79,6 +92,15 @@ class Stage2Config:
     randomization_regime: str = "without_random"
     output_root: str = "trained_models/stage2"
     device: str = "cpu"
+    # Do not LLM-mutate the current best-ever genome (prevents refine regression).
+    protect_elite_refine: bool = True
+    # Phase 2: aggregate proxy metrics over this many train/eval seeds (mean±std).
+    n_eval_seeds: int = 2
+    # Phase 2: after sandbox-OK D.3, keep refine only if verify scalar ≥ parent − tol.
+    accept_reject_refine: bool = True
+    accept_reject_tolerance: float = 0.0
+    # None → max(1, train_env_steps // 4) for the verify pass.
+    accept_reject_steps: Optional[int] = None
 
 
 @dataclass
@@ -92,9 +114,11 @@ class ProxyMetrics:
     pl: float = 0.0
     itr: float = 0.0  # mean intrusion time ratio (%), same as rl.evaluation
     sd: float = 0.0  # mean min distance during Danger frames
+    n_seeds: int = 1
+    metric_std: Optional[Dict[str, float]] = None
 
     def as_dict(self) -> Dict[str, float]:
-        return {
+        out: Dict[str, float] = {
             "SR": float(self.sr),
             "CR": float(self.cr),
             "TR": float(self.tr),
@@ -102,19 +126,72 @@ class ProxyMetrics:
             "PL": float(self.pl),
             "ITR": float(self.itr),
             "SD": float(self.sd),
+            "n_seeds": float(self.n_seeds),
         }
+        if self.metric_std:
+            for key, value in self.metric_std.items():
+                out[f"{key}_std"] = float(value)
+        return out
 
     def feedback_text(self) -> str:
-        """Raw metric values for D.3 (not rankings)."""
+        """Raw metric values for D.3 / logs (not rankings)."""
         d = self.as_dict()
-        return (
+        text = (
             f"SR={d['SR']:.4f}, CR={d['CR']:.4f}, TR={d['TR']:.4f}, "
             f"NT={d['NT']:.4f}, PL={d['PL']:.4f}, ITR={d['ITR']:.4f}, SD={d['SD']:.4f}"
         )
+        if int(self.n_seeds) > 1:
+            text += f" (n_seeds={int(self.n_seeds)})"
+        return text
 
     def scalar_score(self) -> float:
-        """Simple scalar for D.3 last_score field (higher better)."""
-        return float(self.sr - self.cr - 0.5 * self.tr)
+        """Shared II/III selection scalar (D-3 / T7)."""
+        return navigation_scalar(self.sr, self.cr, self.tr, self.itr, self.sd)
+
+
+def aggregate_proxy_metrics(metrics_list: Sequence[ProxyMetrics]) -> ProxyMetrics:
+    """Mean (±std across seeds) aggregation for multi-seed proxy eval."""
+    if not metrics_list:
+        raise ValueError("aggregate_proxy_metrics requires at least one ProxyMetrics")
+    keys = ("sr", "cr", "tr", "nt", "pl", "itr", "sd")
+    means: Dict[str, float] = {}
+    stds: Dict[str, float] = {}
+    for key in keys:
+        vals = np.asarray([getattr(m, key) for m in metrics_list], dtype=np.float64)
+        means[key] = float(np.mean(vals))
+        stds[key] = float(np.std(vals)) if len(vals) > 1 else 0.0
+    return ProxyMetrics(
+        sr=means["sr"],
+        cr=means["cr"],
+        tr=means["tr"],
+        nt=means["nt"],
+        pl=means["pl"],
+        itr=means["itr"],
+        sd=means["sd"],
+        n_seeds=len(metrics_list),
+        metric_std={k.upper(): stds[k] for k in keys} if len(metrics_list) > 1 else None,
+    )
+
+
+def train_eval_multiseed(
+    trainer: "PolicyTrainer",
+    candidate: RewardCandidate,
+    *,
+    round_index: int,
+    config: Stage2Config,
+) -> ProxyMetrics:
+    """Run ``train_and_eval`` over ``config.n_eval_seeds`` seeds and aggregate."""
+    n_seeds = max(1, int(getattr(config, "n_eval_seeds", 1) or 1))
+    per_seed: List[ProxyMetrics] = []
+    base_seed = int(config.seed)
+    for i in range(n_seeds):
+        cfg_i = replace(config, seed=base_seed + i * 1009)
+        per_seed.append(
+            trainer.train_and_eval(
+                candidate, round_index=round_index, config=cfg_i
+            )
+        )
+    return aggregate_proxy_metrics(per_seed)
 
 
 @dataclass
@@ -126,6 +203,8 @@ class Stage2RoundRecord:
     kept_previous: bool
     validation_error: Optional[str] = None
     checkpoint_path: Optional[str] = None
+    refine_accepted: Optional[bool] = None
+    verify_scalar: Optional[float] = None
 
 
 def _stable_code_hash(code: str) -> int:
@@ -161,9 +240,15 @@ class StubPolicyTrainer(PolicyTrainer):
     """
     Deterministic no-op trainer for pytest (seconds, not GPU-hours).
 
-    Metrics depend only on a stable hash of ``candidate.code`` so ranking
-    is reproducible across rounds unless the code changes.
+    Prefer a ``return float(X)`` literal in the candidate source when present
+    (higher X → better SR) so accept/reject tests are controllable; otherwise
+    fall back to a stable hash of ``candidate.code``. ``config.seed`` adds a
+    small jitter so multi-seed aggregation is non-degenerate.
     """
+
+    _FLOAT_RETURN = re.compile(
+        r"return\s+float\(\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*\)"
+    )
 
     def train_and_eval(
         self,
@@ -172,8 +257,13 @@ class StubPolicyTrainer(PolicyTrainer):
         round_index: int,
         config: Stage2Config,
     ) -> ProxyMetrics:
-        base = (_stable_code_hash(candidate.code) % 100) / 100.0
-        jitter = 0.01 * (round_index % 5)
+        match = self._FLOAT_RETURN.search(candidate.code or "")
+        if match:
+            base = min(1.0, max(0.0, float(match.group(1)) / 20.0))
+        else:
+            base = (_stable_code_hash(candidate.code) % 100) / 100.0
+        seed_jitter = 0.01 * float((int(config.seed) % 5) - 2)
+        jitter = 0.01 * (round_index % 5) + seed_jitter
         sr = min(1.0, max(0.0, 0.4 + 0.5 * base + jitter))
         cr = min(1.0, max(0.0, 0.4 * (1.0 - base)))
         tr = max(0.0, 1.0 - sr - cr)
@@ -185,14 +275,18 @@ class StubPolicyTrainer(PolicyTrainer):
             pl=12.0 + 8.0 * (1.0 - base),
             itr=5.0 + 20.0 * (1.0 - base),  # percent, like rl.evaluation
             sd=0.2 + 0.3 * base,
+            n_seeds=1,
         )
 
 
 def _stage2_train_argv(
     config: Stage2Config, candidate_id: str, round_index: int
 ) -> list:
+    # Include seed so multi-seed train_eval_multiseed runs do not overwrite
+    # each other's checkpoints under the same candidate/round (Phase 2.1).
     out_dir = os.path.join(
-        config.output_root, f"r{round_index:02d}_{candidate_id}"
+        config.output_root,
+        f"r{round_index:02d}_{candidate_id}_seed{int(config.seed)}",
     )
     nproc = resolve_num_processes(config.num_processes)
     # A2C.update() always feeds a single mini-batch; SRNN uses
@@ -220,7 +314,7 @@ def _stage2_train_argv(
         "--num-mini-batch",
         str(nbatch),
         "--seed",
-        str(config.seed + round_index),
+        str(int(config.seed) + int(round_index)),
         "--env-name",
         config.env_name,
         "--output_dir",
@@ -688,9 +782,61 @@ class Stage2Runner:
         self.config = config or Stage2Config()
         self.history: List[Stage2RoundRecord] = []
         self.validation_failures: List[Dict[str, Any]] = []
+        # Trained (pre-refine) snapshots; best_trained is best-ever by SR-CR-0.5TR.
+        self.trained_snapshots: List[RewardCandidate] = []
+        self.best_trained: Optional[RewardCandidate] = None
         # Optional paper-scale resume (set by PaperScaleRunner).
         self.checkpoint_store = None  # type: ignore[assignment]
         self.checkpoint_seed: int = int(self.config.seed)
+
+    def _record_trained_snapshot(
+        self,
+        candidate: RewardCandidate,
+        metrics: ProxyMetrics,
+        *,
+        round_index: int,
+        checkpoint_path: Optional[str] = None,
+    ) -> RewardCandidate:
+        """Freeze the genome that produced ``metrics`` (before any LLM refine)."""
+        snapshot = replace(
+            candidate,
+            metadata={
+                **(candidate.metadata or {}),
+                "last_metrics": metrics.as_dict(),
+                "checkpoint_path": checkpoint_path,
+                "trained_round": int(round_index),
+                "trained_snapshot": True,
+            },
+        )
+        self.trained_snapshots.append(snapshot)
+        score = metrics.scalar_score()
+        prev = (
+            candidate_nav_scalar(self.best_trained)
+            if self.best_trained is not None
+            else float("-inf")
+        )
+        if score > prev:
+            self.best_trained = snapshot
+            logger.info(
+                "Stage II new best-ever %s scalar=%.4f (round=%s)",
+                snapshot.candidate_id,
+                score,
+                round_index,
+            )
+            console.status(
+                f"new best-ever {snapshot.candidate_id} "
+                f"SR-CR-0.5TR={score:.3f}",
+                stage="Stage II",
+            )
+        return snapshot
+
+    def _skip_refine_for_elite(self, candidate: RewardCandidate) -> bool:
+        """Do not LLM-mutate the current best-ever genome."""
+        if not bool(getattr(self.config, "protect_elite_refine", True)):
+            return False
+        return self.best_trained is not None and is_same_genome(
+            candidate, self.best_trained
+        )
 
     def _repair_invalid_code(
         self,
@@ -699,21 +845,120 @@ class Stage2Runner:
         validation_error: str,
         metrics: ProxyMetrics,
     ) -> tuple[Optional[str], Optional[str]]:
-        """
-        Single repair attempt: feed back the exact error and ask LLM to fix.
-        Returns (repaired_code, error) or (None, error_reason) if repair fails.
-        """
-        repair_prompt = format_d3_repair(
-            bad_code=bad_code,
-            validation_error=validation_error,
+        """Single D.3 repair attempt (shared harness)."""
+        del candidate_id, metrics
+        return repair_invalid_code(
+            self.llm, bad_code=bad_code, validation_error=validation_error
         )
-        full_prompt = f"{D3_SYSTEM_PROMPT}\n\n{repair_prompt}"
-        try:
-            raw = self.llm.complete(full_prompt)
-            repaired_code = normalize_to_compute_reward(extract_python_code(raw))
-            return repaired_code, None
-        except Exception as exc:  # noqa: BLE001
-            return None, str(exc)
+
+    def _verify_config(self, config: Stage2Config) -> Stage2Config:
+        """Reduced-budget config for accept/reject verification."""
+        steps = resolve_verify_train_steps(
+            config.train_env_steps, config.accept_reject_steps
+        )
+        return replace(config, train_env_steps=int(steps))
+
+    def _maybe_accept_refine(
+        self,
+        parent: RewardCandidate,
+        proposed: RewardCandidate,
+        parent_metrics: ProxyMetrics,
+        *,
+        round_index: int,
+    ) -> tuple:
+        """
+        Metric accept/reject after sandbox-OK D.3 (Phase 2 / 2.1 / T12).
+
+        Parent and proposed are both re-scored under the **same** reduced
+        verify budget so the comparison is budget-fair (not full-K2 vs K2/4).
+
+        Returns ``(candidate, kept_previous, refine_accepted, verify_scalar)``.
+        """
+        if bool((proposed.metadata or {}).get("refine_kept_previous")):
+            return proposed, True, None, None
+        if not bool(getattr(self.config, "accept_reject_refine", True)):
+            return proposed, False, True, None
+
+        verify_cfg = self._verify_config(self.config)
+        parent_verify = train_eval_multiseed(
+            self.trainer,
+            parent,
+            round_index=round_index,
+            config=verify_cfg,
+        )
+        proposed_verify = train_eval_multiseed(
+            self.trainer,
+            proposed,
+            round_index=round_index,
+            config=verify_cfg,
+        )
+        decision = decide_accept_reject(
+            parent_verify_scalar=parent_verify.scalar_score(),
+            proposed_verify_scalar=proposed_verify.scalar_score(),
+            parent_full_scalar=parent_metrics.scalar_score(),
+            tolerance=float(
+                getattr(self.config, "accept_reject_tolerance", 0.0) or 0.0
+            ),
+        )
+
+        if decision.accepted:
+            console.status(
+                f"accept refine {proposed.candidate_id}: "
+                f"verify={decision.verify_scalar:.3f} "
+                f"parent_verify={decision.parent_verify_scalar:.3f} "
+                f"(full_parent={decision.parent_full_scalar:.3f})",
+                stage="Stage II",
+            )
+            accepted = replace(
+                proposed,
+                metadata=build_accept_metadata(
+                    proposed.metadata,
+                    parent_id=parent.candidate_id,
+                    parent_code=parent.code,
+                    proposed_code=proposed.code,
+                    decision=decision,
+                    proposed_verify_metrics=proposed_verify.as_dict(),
+                    parent_verify_metrics=parent_verify.as_dict(),
+                ),
+            )
+            return accepted, False, True, decision.verify_scalar
+
+        console.status(
+            f"reject refine {proposed.candidate_id}: "
+            f"verify={decision.verify_scalar:.3f} < "
+            f"parent_verify={decision.parent_verify_scalar:.3f} "
+            f"(tol={decision.tolerance})",
+            stage="Stage II",
+        )
+        logger.info(
+            "Metric-reject D.3 for %s: verify=%.4f parent_verify=%.4f full_parent=%.4f",
+            proposed.candidate_id,
+            decision.verify_scalar,
+            decision.parent_verify_scalar,
+            decision.parent_full_scalar,
+        )
+        self.validation_failures.append(
+            build_metric_reject_failure(
+                parent_id=parent.candidate_id,
+                proposed_id=proposed.candidate_id,
+                decision=decision,
+            )
+        )
+        rejected = replace(
+            parent,
+            metadata=build_reject_metadata(
+                parent.metadata,
+                parent_id=parent.candidate_id,
+                parent_code=parent.code,
+                parent_metrics=parent_metrics.as_dict(),
+                proposed_id=proposed.candidate_id,
+                proposed_code=proposed.code,
+                decision=decision,
+                proposed_verify_metrics=proposed_verify.as_dict(),
+                parent_verify_metrics=parent_verify.as_dict(),
+            ),
+        )
+        return rejected, True, False, decision.verify_scalar
 
     def refine_candidate(
         self,
@@ -722,13 +967,15 @@ class Stage2Runner:
     ) -> RewardCandidate:
         """
         D.3 refinement → ``*_v2``. On sandbox failure, attempt ONE repair before keeping previous.
+
+        Metric accept/reject is applied by ``_maybe_accept_refine`` after this returns.
         """
         feedback = metrics.feedback_text()
         user_prompt = format_d3_refinement(
             candidate.code,
             last_score=metrics.scalar_score(),
             feedback=feedback,
-            extra_context_if_any="",
+            extra_context_if_any=failure_mode_summary(metrics),
         )
         full_prompt = f"{D3_SYSTEM_PROMPT}\n\n{user_prompt}"
         try:
@@ -835,6 +1082,21 @@ class Stage2Runner:
                 },
             )
 
+        # New code is untested — do not attach parent train metrics as its own.
+        parent_md = {
+            k: v
+            for k, v in (candidate.metadata or {}).items()
+            if k
+            not in (
+                "last_metrics",
+                "checkpoint_path",
+                "trained_snapshot",
+                "trained_round",
+                "refine_kept_previous",
+                "refine_error",
+                "refine_skipped_elite",
+            )
+        }
         return replace(
             candidate,
             candidate_id=_v2_candidate_id(candidate.candidate_id),
@@ -845,9 +1107,10 @@ class Stage2Runner:
             origin="refinement",
             parent_ids=(candidate.candidate_id,),
             metadata={
-                **candidate.metadata,
+                **parent_md,
                 "refine_kept_previous": False,
-                "last_metrics": metrics.as_dict(),
+                "parent_metrics": metrics.as_dict(),
+                "parent_id": candidate.candidate_id,
             },
         )
 
@@ -875,13 +1138,23 @@ class Stage2Runner:
             refined, metrics, kept, wall_s, resumed = self._train_refine_one(
                 cand, round_index=round_index
             )
+            md = refined.metadata or {}
+            if md.get("refine_rejected_metric"):
+                refine_accepted: Optional[bool] = False
+            elif "refine_accepted" in md:
+                refine_accepted = bool(md.get("refine_accepted"))
+            else:
+                refine_accepted = None
+            verify_scalar = md.get("refine_verify_scalar")
             rec = Stage2RoundRecord(
                 round_index=round_index,
                 candidate_id=cand.candidate_id,
                 metrics=metrics,
                 refined=not kept,
                 kept_previous=kept,
-                validation_error=refined.metadata.get("refine_error"),
+                validation_error=md.get("refine_error"),
+                refine_accepted=refine_accepted,
+                verify_scalar=float(verify_scalar) if verify_scalar is not None else None,
             )
             self.history.append(rec)
             round_records.append(rec)
@@ -892,10 +1165,41 @@ class Stage2Runner:
                     "resumed": resumed,
                 }
             next_pop.append(refined)
+        next_pop = self._inject_elite(next_pop)
         console.stage_round_summary(
             "Stage II", round_index, self.config.rounds, round_records
         )
         return next_pop
+
+    def _inject_elite(
+        self, population: List[RewardCandidate]
+    ) -> List[RewardCandidate]:
+        """Keep best-ever genome in the next round population (elitism)."""
+        elite = self.best_trained
+        if elite is None or not population:
+            return population
+        if any(is_same_genome(c, elite) for c in population):
+            return population
+        worst_i = min(
+            range(len(population)),
+            key=lambda i: candidate_nav_scalar(population[i]),
+        )
+        logger.info(
+            "Elitism: injecting best-ever %s (replacing %s)",
+            elite.candidate_id,
+            population[worst_i].candidate_id,
+        )
+        # Carry elite code forward; drop stale refine flags for a clean retrain.
+        population[worst_i] = replace(
+            elite,
+            metadata={
+                **(elite.metadata or {}),
+                "elite_injected": True,
+                "refine_kept_previous": True,
+                "refine_skipped_elite": False,
+            },
+        )
+        return population
 
     def _train_refine_one(
         self,
@@ -931,6 +1235,7 @@ class Stage2Runner:
                     pl=float(md.get("PL", md.get("pl", 0.0))),
                     itr=float(md.get("ITR", md.get("itr", 0.0))),
                     sd=float(md.get("SD", md.get("sd", 0.0))),
+                    n_seeds=int(md.get("n_seeds", 1) or 1),
                 )
                 kept = bool(payload.get("kept_previous"))
                 logger.info(
@@ -953,14 +1258,36 @@ class Stage2Runner:
                             resumed=True,
                         )
                     )
+                self._record_trained_snapshot(
+                    cand, metrics, round_index=round_index
+                )
                 return refined, metrics, kept, 0.0, True
 
         t0 = time.perf_counter()
-        metrics = self.trainer.train_and_eval(
-            cand, round_index=round_index, config=self.config
+        metrics = train_eval_multiseed(
+            self.trainer, cand, round_index=round_index, config=self.config
         )
-        refined = self.refine_candidate(cand, metrics)
-        kept = bool(refined.metadata.get("refine_kept_previous"))
+        self._record_trained_snapshot(cand, metrics, round_index=round_index)
+        if self._skip_refine_for_elite(cand):
+            logger.info(
+                "Skipping D.3 refine for elite genome %s (protect best-ever)",
+                cand.candidate_id,
+            )
+            refined = replace(
+                cand,
+                metadata={
+                    **(cand.metadata or {}),
+                    "refine_kept_previous": True,
+                    "refine_skipped_elite": True,
+                    "last_metrics": metrics.as_dict(),
+                },
+            )
+            kept = True
+        else:
+            proposed = self.refine_candidate(cand, metrics)
+            refined, kept, _accepted, _vs = self._maybe_accept_refine(
+                cand, proposed, metrics, round_index=round_index
+            )
         wall_s = float(time.perf_counter() - t0)
         if store is not None and key is not None:
             store.save(

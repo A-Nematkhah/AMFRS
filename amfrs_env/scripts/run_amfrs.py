@@ -1,22 +1,22 @@
 #!/usr/bin/env python
 """
-Single entry point for EvoNav Algorithm 1 (faithful replication baseline).
+Single entry point for AMFRS Algorithm 1 (faithful replication baseline).
 
   seed generation → Stage I → Stage II → Stage III
 
 No AMFRS mechanisms (novelty archive, Pareto ranking, adaptive controller).
 
-Examples (from ``evonav_env/`` with system Python)::
+Examples (from ``amfrs_env/`` with system Python)::
 
     # Seconds-scale dry run (stub trainers + seed LLM)
-    python scripts/run_evonav.py --fast --output-dir results/evonav_fast
+    python scripts/run_amfrs.py --fast --output-dir results/amfrs_fast
 
     # Practical local run (real trainers, reduced Stage III K3)
-    python scripts/run_evonav.py --llm seed --output-dir results/evonav_local
+    python scripts/run_amfrs.py --llm seed --output-dir results/amfrs_local
 
     # Paper-faithful Stage III budget on a GPU cluster
-    python scripts/run_evonav.py --llm vllm --stage3-train-steps 10000000 \\
-        --device cuda --output-dir results/evonav_paper
+    python scripts/run_amfrs.py --llm vllm --stage3-train-steps 10000000 \\
+        --device cuda --output-dir results/amfrs_paper
 """
 
 from __future__ import annotations
@@ -36,11 +36,11 @@ os.chdir(_ROOT)
 
 
 def main() -> int:
-    from crowd_nav.reward_search.pipeline import EvoNavPipeline, EvoNavRunConfig
+    from crowd_nav.reward_search.pipeline import AMFRSPipeline, AMFRSRunConfig
     from crowd_nav.reward_search.stage3 import STAGE3_PAPER_STEPS, STAGE3_STEPS
 
-    parser = argparse.ArgumentParser(description="EvoNav Algorithm 1 end-to-end")
-    parser.add_argument("--output-dir", type=str, default="results/evonav_run")
+    parser = argparse.ArgumentParser(description="AMFRS Algorithm 1 end-to-end")
+    parser.add_argument("--output-dir", type=str, default="results/amfrs_run")
     parser.add_argument("--seed", type=int, default=425)
     parser.add_argument("--llm-model", type=str, default=None)
     parser.add_argument(
@@ -87,7 +87,17 @@ def main() -> int:
         "--human-num",
         type=int,
         default=None,
-        help="Crowd size for Stage II/III (default 20; --easy sets 5)",
+        help="Crowd size for Stage II/III train (default 20; --easy sets 5)",
+    )
+    parser.add_argument(
+        "--h-sweep-counts",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated H values for Stage III generalization sweep "
+            "(must be <= --human-num). Example: 3,5,7. Default: paper "
+            "{5,10,15,20} clipped to human-num."
+        ),
     )
     parser.add_argument(
         "--predict-method",
@@ -102,7 +112,7 @@ def main() -> int:
         default=None,
         choices=["paper"],
         help=(
-            "Named budget preset. 'paper' redirects to scripts/run_evonav_paper_scale.py "
+            "Named budget preset. 'paper' redirects to scripts/run_amfrs_paper_scale.py "
             "(Tables 3–6, multi-seed); not used by pytest."
         ),
     )
@@ -125,7 +135,12 @@ def main() -> int:
     parser.add_argument("--stage1-generations", type=int, default=10)
 
     parser.add_argument("--stage2-rounds", type=int, default=16)
-    parser.add_argument("--stage2-train-steps", type=int, default=8000)
+    parser.add_argument(
+        "--stage2-train-steps",
+        type=int,
+        default=50_000,
+        help="K2 env steps per Stage II candidate (paper=8000; default 5e4 for ranking)",
+    )
     parser.add_argument("--stage2-eval-episodes", type=int, default=50)
     parser.add_argument("--stage2-stub", action="store_true")
 
@@ -139,6 +154,12 @@ def main() -> int:
     parser.add_argument("--stage3-eval-episodes", type=int, default=500)
     parser.add_argument("--stage3-stub", action="store_true")
     parser.add_argument("--no-h-sweep", action="store_true")
+    parser.add_argument(
+        "--stage3-max-finalists",
+        type=int,
+        default=3,
+        help="Admit only top-k Stage II genomes into Stage III (Phase 3)",
+    )
 
     args = parser.parse_args()
 
@@ -146,7 +167,7 @@ def main() -> int:
         # Multi-seed paper budgets live in a dedicated human-triggered script.
         print(
             "Paper-scale (Tables 3–6, multi-seed) is only available via:\n"
-            "  python scripts/run_evonav_paper_scale.py\n"
+            "  python scripts/run_amfrs_paper_scale.py\n"
             "Pass --seeds / --device there. This keeps pytest/--fast unchanged "
             "and avoids accidental CI runs of K3=1e7.",
             file=sys.stderr,
@@ -182,7 +203,7 @@ def main() -> int:
 
     import crowd_sim  # noqa: F401
 
-    cfg = EvoNavRunConfig(
+    cfg = AMFRSRunConfig(
         output_dir=args.output_dir,
         seed=args.seed,
         llm_provider=args.llm,
@@ -200,6 +221,7 @@ def main() -> int:
         stage3_eval_episodes=args.stage3_eval_episodes,
         stage3_use_stub=args.stage3_stub or args.fast,
         stage3_run_h_sweep=not args.no_h_sweep,
+        stage3_max_finalists=args.stage3_max_finalists,
         device=args.device,
         num_processes=args.num_processes,
         randomization_regime=args.regime,
@@ -223,17 +245,36 @@ def main() -> int:
         cfg.predict_method = args.predict_method
     if args.human_num is not None:
         cfg.human_num = max(1, int(args.human_num))
+    if args.h_sweep_counts is not None:
+        parts = [p.strip() for p in str(args.h_sweep_counts).split(",") if p.strip()]
+        try:
+            counts = tuple(int(p) for p in parts)
+        except ValueError:
+            print(
+                f"Invalid --h-sweep-counts={args.h_sweep_counts!r}; "
+                "expected comma-separated ints like 3,5,7",
+                file=sys.stderr,
+            )
+            return 2
+        if not counts:
+            print("--h-sweep-counts is empty", file=sys.stderr)
+            return 2
+        cfg.stage3_h_counts = counts
 
     logging.info(
-        "EvoNav Algorithm 1 → %s (fast=%s, easy=%s, humans=%d, predict=%s, K3=%d)",
+        "AMFRS Algorithm 1 → %s (fast=%s, easy=%s, humans=%d, predict=%s, "
+        "K3=%d, h_sweep=%s)",
         cfg.output_dir,
         cfg.fast,
         bool(args.easy),
         cfg.human_num,
         cfg.predict_method,
         cfg.stage3_train_steps,
+        cfg.stage3_h_counts
+        if cfg.stage3_h_counts is not None
+        else "auto",
     )
-    artifacts = EvoNavPipeline(cfg).run()
+    artifacts = AMFRSPipeline(cfg).run()
     logging.info("Done. Final candidate: %s", artifacts.best_stage3.candidate_id)
     logging.info("Artifacts: %s", artifacts.output_dir)
     return 0

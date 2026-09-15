@@ -1,5 +1,5 @@
 """
-Live terminal feedback for EvoNav runs.
+Live terminal feedback for AMFRS runs.
 
 This module is about what a user sees *while a run is in progress*.
 It does not write JSON artifacts or change algorithms. Progress bars use
@@ -33,7 +33,7 @@ def is_verbose() -> bool:
 
 def is_interactive() -> bool:
     """True when stderr looks like a live terminal (not a pipe / CI capture)."""
-    if os.environ.get("EVONAV_FORCE_TQDM", "").strip() in ("1", "true", "yes"):
+    if os.environ.get("AMFRS_FORCE_TQDM", "").strip() in ("1", "true", "yes"):
         return True
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
         return False
@@ -265,7 +265,7 @@ def final_run_summary(
     best_stage2: Optional[Any] = None,
     best_stage3: Optional[Any] = None,
 ) -> None:
-    banner("EvoNav Algorithm 1 - finished")
+    banner("AMFRS Algorithm 1 - finished")
     status(f"Total wall-clock: {format_seconds(wall_seconds)}")
     for label, cand in (
         ("Stage I best", best_stage1),

@@ -5,7 +5,7 @@ Human-triggered Stage II smoke test against the real A2C trainer.
 This is intentionally slow (real env + policy). For CI / pytest use the stub
 trainer in ``crowd_nav/reward_search/tests/test_stage2.py`` instead.
 
-Example (from ``evonav_env/`` with the project venv active)::
+Example (from ``amfrs_env/`` with the project venv active)::
 
     python scripts/run_stage2_smoke.py
     python scripts/run_stage2_smoke.py --train-env-steps 200 --eval-episodes 2

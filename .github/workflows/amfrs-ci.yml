@@ -1,22 +1,22 @@
-# Fast unit tests for evonav_env / crowd_nav.reward_search (no GPU, no Groq network).
-name: evonav-env-ci
+# Fast unit tests for amfrs_env / crowd_nav.reward_search (no GPU, no Groq network).
+name: amfrs-env-ci
 
 on:
   push:
     paths:
-      - "evonav_env/**"
-      - ".github/workflows/evonav-ci.yml"
+      - "amfrs_env/**"
+      - ".github/workflows/amfrs-ci.yml"
   pull_request:
     paths:
-      - "evonav_env/**"
-      - ".github/workflows/evonav-ci.yml"
+      - "amfrs_env/**"
+      - ".github/workflows/amfrs-ci.yml"
 
 jobs:
   test:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: evonav_env
+        working-directory: amfrs_env
 
     steps:
       - uses: actions/checkout@v4

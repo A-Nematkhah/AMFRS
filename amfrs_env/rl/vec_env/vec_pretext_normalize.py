@@ -113,12 +113,16 @@ class VecPretextNormalize(VecEnvWrapper):
         # O: robot_node: [nenv, 1, 7], spatial_edges: [nenv, observed_human_num, 2*(1+predict_steps)],temporal_edges: [nenv, 1, 2],
         # pos_mask: [nenv, max_human_num], pos_disp_mask: [nenv, max_human_num]
         # prepare inputs for pred_model
-        # find humans' absolute positions
-        human_pos = O['robot_node'][:, :, :2] + O['spatial_edges'][:, :, :2]
+        # find humans' absolute positions (keep on wrapper device — obs may
+        # arrive on CUDA while GST buffers were allocated on CPU or vice versa)
+        human_pos = (O["robot_node"][:, :, :2] + O["spatial_edges"][:, :, :2]).to(
+            self.device
+        )
+        visible = O["visible_masks"].unsqueeze(-1).to(self.device)
 
         # insert the new ob to deque
         self.traj_buffer.append(human_pos)
-        self.mask_buffer.append(O['visible_masks'].unsqueeze(-1))
+        self.mask_buffer.append(visible)
         # [obs_seq_len, nenv, max_human_num, 2] -> [nenv, max_human_num, obs_seq_len, 2]
         in_traj = torch.stack(list(self.traj_buffer)).permute(1, 2, 0, 3)
         in_mask = torch.stack(list(self.mask_buffer)).permute(1, 2, 0, 3).float()
@@ -135,7 +139,8 @@ class VecPretextNormalize(VecEnvWrapper):
         # deterministic reward, only uses mu_x, mu_y and a predefined radius
         # constant radius of each personal zone circle
         # [nenv, human_num, predict_steps]
-        hr_dist_future = out_traj[:, :, :, :2] - O['robot_node'][:, :, :2].unsqueeze(1)
+        robot_xy = O["robot_node"][:, :, :2].to(self.device)
+        hr_dist_future = out_traj[:, :, :, :2] - robot_xy.unsqueeze(1)
         # [nenv, human_num, predict_steps]
         collision_idx = torch.norm(hr_dist_future, dim=-1) < self.config.robot.radius + self.config.humans.radius
 
@@ -159,7 +164,7 @@ class VecPretextNormalize(VecEnvWrapper):
         rews = rews + reward_future.reshape(self.num_envs, 1).cpu().numpy()
 
         # get observation back to env
-        robot_pos = O['robot_node'][:, :, :2].unsqueeze(1)
+        robot_pos = robot_xy.unsqueeze(1)
 
         # convert from positions in world frame to robot frame
         out_traj[:, :, :, :2] = out_traj[:, :, :, :2] - robot_pos
@@ -167,7 +172,12 @@ class VecPretextNormalize(VecEnvWrapper):
         # only take mu_x and mu_y
         out_mask = out_mask.repeat(1, 1, self.config.sim.predict_steps * 2)
         new_spatial_edges = out_traj[:, :, :, :2].reshape(self.num_envs, self.max_human_num, -1)
-        O['spatial_edges'][:, :, 2:][out_mask] = new_spatial_edges[out_mask]
+        # Write predictions back on the observation tensor's device.
+        spatial = O["spatial_edges"]
+        new_spatial_edges = new_spatial_edges.to(spatial.device)
+        out_mask = out_mask.to(spatial.device)
+        spatial[:, :, 2:][out_mask] = new_spatial_edges[out_mask]
+        O["spatial_edges"] = spatial
 
         # sort all humans by distance to robot
         # [nenv, human_num]
