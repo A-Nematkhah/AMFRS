@@ -55,6 +55,18 @@ Override the server with `OLLAMA_BASE_URL` (default `http://localhost:11434/v1`)
 
 Defaults: `without_random`, `predict_method=inferred` (unless `--fast` / `--predict-method none`).
 
+Real (non-stub) runs refuse to start if `--output-dir` has &lt; ~500 MB free, or if
+TEMP has &lt; ~1 GB free. On a cramped system drive, set a roomy temp root before
+launching, e.g. PowerShell:
+
+```powershell
+$env:AMFRS_TEMP = "J:\amfrs_temp"
+python scripts/run_amfrs.py --allow-seed-llm --device cpu --output-dir J:\amfrs_runs\my_run
+```
+
+If `AMFRS_TEMP` is unset and the default TEMP volume is tight, the launcher
+redirects TEMP under `<output-dir>/.amfrs_tmp` when that volume has space.
+
 ## Tests
 
 ```bash

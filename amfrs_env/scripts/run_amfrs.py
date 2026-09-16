@@ -34,7 +34,11 @@ os.chdir(_ROOT)
 def main() -> int:
     from crowd_nav.reward_search.amfrs import AMFRSPipeline, AMFRSRunConfig
     from crowd_nav.reward_search.amfrs.assets import check_amfrs_assets
-    from crowd_nav.reward_search.parallelism import configure_worker_thread_env
+    from crowd_nav.reward_search.parallelism import (
+        check_run_disk_space,
+        configure_run_temp,
+        configure_worker_thread_env,
+    )
 
     configure_worker_thread_env()
 
@@ -185,22 +189,14 @@ def main() -> int:
     if args.num_processes is not None:
         cfg.num_processes = int(args.num_processes)
 
-    # Fail early when the output volume is nearly full (common on tiny/mapped drives).
-    try:
-        import shutil
-
-        os.makedirs(cfg.output_dir, exist_ok=True)
-        free = shutil.disk_usage(cfg.output_dir).free
-        if free < 500 * 1024 * 1024 and not (cfg.fast or cfg.use_stub_trainers):
-            print(
-                f"Refusing real run: only {free / 1e6:.0f} MB free under "
-                f"{cfg.output_dir}. Use a larger drive for --output-dir "
-                f"(e.g. J:\\amfrs_runs\\...) or free disk space.",
-                file=sys.stderr,
-            )
+    # Fail early when output/TEMP volumes are nearly full (Errno 28 / torch zip
+    # corruption on tiny mapped drives like a full I: or cramped C:\\Temp).
+    if not (cfg.fast or cfg.use_stub_trainers):
+        configure_run_temp(output_dir=cfg.output_dir)
+        ok_disk, disk_msg = check_run_disk_space(cfg.output_dir)
+        if not ok_disk:
+            print(disk_msg, file=sys.stderr)
             return 3
-    except OSError as exc:
-        print(f"Could not check disk space for {cfg.output_dir}: {exc}", file=sys.stderr)
 
     try:
         artifacts = AMFRSPipeline(cfg).run()
