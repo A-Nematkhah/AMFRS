@@ -56,3 +56,22 @@ def test_real_sweep_does_not_silent_stub_fallback(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "trainer exploded" in str(exc)
+
+
+def test_opt_in_stub_fallback_marks_metrics(monkeypatch):
+    cand = RewardCandidate(
+        candidate_id="c0",
+        code="def compute_reward(state, memory):\n    return float(5.0)\n",
+        valid=True,
+        metadata={},
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("trainer exploded")
+
+    monkeypatch.setattr(
+        "crowd_nav.reward_search.amfrs.robustness._run_policy_sweep_real",
+        _boom,
+    )
+    out = run_policy_sweep(cand, use_stub=False, allow_stub_fallback=True)
+    assert out["orca"].get("stub_fallback") is True

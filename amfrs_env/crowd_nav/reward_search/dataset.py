@@ -99,16 +99,20 @@ def _action_to_json(action: Any) -> Any:
 
 
 def _action_from_json(obj: Any) -> Any:
+    """Rebuild action namedtuples without importing ``crowd_sim.envs`` (avoids rvo2)."""
     if obj is None:
         return None
     if isinstance(obj, Mapping):
-        if "vx" in obj and "vy" in obj:
-            from crowd_sim.envs.utils.action import ActionXY
+        # Local namedtuples match crowd_sim.envs.utils.action field layout.
+        # Importing that module via the package pulls CrowdSim → rvo2, which
+        # Score1 dataset scoring does not need.
+        from collections import namedtuple
 
+        if "vx" in obj and "vy" in obj:
+            ActionXY = namedtuple("ActionXY", ["vx", "vy"])
             return ActionXY(float(obj["vx"]), float(obj["vy"]))
         if "v" in obj and "r" in obj:
-            from crowd_sim.envs.utils.action import ActionRot
-
+            ActionRot = namedtuple("ActionRot", ["v", "r"])
             return ActionRot(float(obj["v"]), float(obj["r"]))
     return obj
 

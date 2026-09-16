@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
@@ -28,6 +29,7 @@ from crowd_nav.reward_search.amfrs.crossover import (
     build_memory_block,
     build_mutation_prompt,
     build_semantic_crossover_prompt,
+    format_candidate_diagnostics,
 )
 from crowd_nav.reward_search.amfrs.ensemble_critique import critique_agrees
 from crowd_nav.reward_search.amfrs.assets import require_amfrs_assets
@@ -110,8 +112,6 @@ class AMFRSPipeline:
         self.promotion_log: List[Dict[str, Any]] = []
         self.cost_trace: List[Dict[str, Any]] = []
         self._spent = [0.0]
-        # Active cost box for the current scheduler.run (may be a per-gen box).
-        self._active_spent: List[float] = self._spent
         self._best_metric = float("-inf")
 
     @staticmethod
@@ -266,7 +266,11 @@ class AMFRSPipeline:
                 f"    return float({1.5 + 0.05 * i} * g - {18.0 + (i % 7)} * c - d)\n"
             )
         mem = self._memory_block_for(parent.code)
-        prompt = build_mutation_prompt(parent, memory_block=mem)
+        prompt = build_mutation_prompt(
+            parent,
+            diagnostics=format_candidate_diagnostics(parent),
+            memory_block=mem,
+        )
         raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
         return normalize_to_compute_reward(extract_python_code(raw) or raw)
 
@@ -283,11 +287,12 @@ class AMFRSPipeline:
         n = max(1, int(cfg.population_size))
         max_attempts = n * max(1, int(cfg.max_invalid_replacements))
         parent_list = list(parents)
+        rng = random.Random(int(cfg.seed) + int(gen) * 1009 + 17)
         children: List[RewardCandidate] = []
         attempt = 0
         while len(children) < n and attempt < max_attempts:
             slot = len(children)
-            parent = parent_list[slot % len(parent_list)]
+            parent = rng.choice(parent_list) if parent_list else parent_list[0]
             # Last slot: prefer crossover when >=2 parents (once), else mutate
             use_xover = (
                 slot == n - 1
@@ -308,10 +313,15 @@ class AMFRSPipeline:
                             "- discomfort_penalty(state, memory))\n"
                         )
                     else:
-                        a, b = parent_list[0], parent_list[1]
+                        if len(parent_list) >= 2:
+                            a, b = rng.sample(parent_list, 2)
+                        else:
+                            a = b = parent_list[0]
                         prompt = build_semantic_crossover_prompt(
                             a,
                             b,
+                            diagnostics_a=format_candidate_diagnostics(a),
+                            diagnostics_b=format_candidate_diagnostics(b),
                             memory_block=self._memory_block_for(a.code),
                         )
                         raw = self.llm_a.complete(AMFRS_SYSTEM_PROMPT + "\n" + prompt)
@@ -331,7 +341,7 @@ class AMFRSPipeline:
                     continue
                 assert cand is not None
                 if cfg.use_ensemble_critique and not cfg.fast:
-                    diag = str((parent.metadata or {}).get("last_metric", ""))
+                    diag = format_candidate_diagnostics(parent)
                     report = critique_agrees(cand, diag, self.llm_a, self.llm_b)
                     cand = replace(
                         cand,
@@ -365,13 +375,13 @@ class AMFRSPipeline:
         return children
 
     def _on_rung_complete(self, level_name: str, survivors: List[RewardCandidate]) -> None:
-        active = self._active_spent if self._active_spent is not None else self._spent
+        spent_now = float(self._spent[0])
         self.promotion_log.append(
             {
                 "level": level_name,
                 "n_survivors": len(survivors),
                 "ids": [c.candidate_id for c in survivors],
-                "spent_cost": float(active[0]),
+                "spent_cost": spent_now,
             }
         )
         for cand in survivors:
@@ -381,8 +391,7 @@ class AMFRSPipeline:
                 self._best_metric = metric
             self.cost_trace.append(
                 {
-                    "spent_cost": float(active[0]),
-                    "global_spent_cost": float(self._spent[0]),
+                    "spent_cost": spent_now,
                     "best_metric": float(self._best_metric),
                     "level": level_name,
                     "candidate_id": cand.candidate_id,
@@ -432,6 +441,7 @@ class AMFRSPipeline:
         after_rung: Optional[str] = None,
         max_cost_units: Optional[float] = None,
         use_generation_budget: bool = True,
+        cost_offset: float = 0.0,
     ) -> SuccessiveHalvingScheduler:
         use_stub = bool(self.config.use_stub_trainers or self.config.fast)
         ladder = build_default_ladder(
@@ -470,6 +480,7 @@ class AMFRSPipeline:
                 eta=int(self.config.halving_eta),
                 min_survivors=int(self.config.halving_min_survivors),
                 max_cost_units=cost_cap,
+                cost_offset=float(cost_offset),
             ),
             bandit=bandit,
         )
@@ -499,8 +510,7 @@ class AMFRSPipeline:
         )
 
         # Initial halving climb (up to illumination_max_rung, then optionally final)
-        self._active_spent = self._spent
-        sched = self._build_scheduler(cfg.illumination_max_rung)
+        sched = self._build_scheduler(cfg.illumination_max_rung, cost_offset=0.0)
         survivors = sched.run(
             accepted,
             on_rung_complete=self._on_rung_complete,
@@ -524,17 +534,16 @@ class AMFRSPipeline:
             if not children:
                 coverages.append(self.archive.coverage())
                 continue
-            # Reset per-generation spent counter but keep global trace
-            gen_spent = [0.0]
-            self._active_spent = gen_spent
-            gen_sched = self._build_scheduler(cfg.illumination_max_rung)
+            gen_start = float(self._spent[0])
+            gen_sched = self._build_scheduler(
+                cfg.illumination_max_rung,
+                cost_offset=gen_start,
+            )
             survivors = gen_sched.run(
                 children,
                 on_rung_complete=self._on_rung_complete,
-                spent_cost=gen_spent,
+                spent_cost=self._spent,
             )
-            self._spent[0] += gen_spent[0]
-            self._active_spent = self._spent
             coverages.append(self.archive.coverage())
 
         # Finalists: archive elites or scalar top survivors
@@ -545,23 +554,22 @@ class AMFRSPipeline:
 
         # Optional final rung bump: only rungs ABOVE illumination (no F0 restart).
         if finalists and cfg.final_rung and cfg.final_rung != cfg.illumination_max_rung:
-            final_spent = [0.0]
-            self._active_spent = final_spent
+            final_start = float(self._spent[0])
             final_sched = self._build_scheduler(
                 cfg.final_rung,
                 after_rung=cfg.illumination_max_rung,
                 max_cost_units=cfg.final_rung_max_cost_units,
                 use_generation_budget=False,
+                cost_offset=final_start,
             )
             finalists = final_sched.run(
                 finalists,
                 on_rung_complete=self._on_rung_complete,
-                spent_cost=final_spent,
+                spent_cost=self._spent,
             )
-            self._spent[0] += final_spent[0]
-            self._active_spent = self._spent
 
         # Axis 4 robustness on finalists
+        robustness_sweep_degraded = False
         if cfg.run_robustness_sweep and finalists:
             robustified = []
             for cand in finalists:
@@ -580,6 +588,11 @@ class AMFRSPipeline:
                         output_root=os.path.join(cfg.output_dir, "robustness"),
                         randomization_regime=str(cfg.randomization_regime),
                     )
+                    if any(
+                        isinstance(v, dict) and v.get("stub_fallback")
+                        for v in by_pol.values()
+                    ):
+                        robustness_sweep_degraded = True
                     robustified.append(attach_robustness_profile(cand, by_pol))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
@@ -628,6 +641,7 @@ class AMFRSPipeline:
             "best_robustness": (best.metadata or {}).get("robustness_scalar") if best else None,
             "assets": asset_report.to_dict(),
             "use_stub_trainers": use_stub,
+            "robustness_sweep_degraded": bool(robustness_sweep_degraded),
             "notes": (
                 "AMFRS multi-fidelity search. "
                 "Axes: static gate, successive halving, MAP-Elites, "

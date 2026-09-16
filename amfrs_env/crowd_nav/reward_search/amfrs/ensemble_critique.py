@@ -62,8 +62,9 @@ def critique_agrees(
     )
     critique_a = client_a.complete(prompt)
     critique_b = client_b.complete(prompt)
-    terms_a = _extract_terms(critique_a)
-    terms_b = _extract_terms(critique_b)
+    code_terms = _extract_terms(candidate.code)
+    terms_a = _extract_terms(critique_a) - code_terms
+    terms_b = _extract_terms(critique_b) - code_terms
     shared = sorted(terms_a & terms_b)
     agreed = len(shared) >= int(min_shared)
     return AgreementReport(

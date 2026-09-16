@@ -22,6 +22,11 @@ class HalvingConfig:
     eta: int = 3
     min_survivors: int = 1
     max_cost_units: Optional[float] = None
+    # Subtract from ``spent_cost[0]`` when enforcing ``max_cost_units`` (per-generation cap).
+    cost_offset: float = 0.0
+
+    def effective_spent(self, cost_box: Sequence[float]) -> float:
+        return float(cost_box[0]) - float(self.cost_offset)
 
 
 class SuccessiveHalvingScheduler:
@@ -58,12 +63,13 @@ class SuccessiveHalvingScheduler:
         for level in self.ladder:
             if len(alive) < self.config.min_survivors and level != self.ladder.levels[0]:
                 break
-            if self.config.max_cost_units is not None and cost_box[0] >= self.config.max_cost_units:
+            eff = self.config.effective_spent(cost_box)
+            if self.config.max_cost_units is not None and eff >= self.config.max_cost_units:
                 break
             # Skip entire rung if we cannot afford even one evaluation.
             if (
                 self.config.max_cost_units is not None
-                and cost_box[0] + float(level.cost_units) > self.config.max_cost_units
+                and eff + float(level.cost_units) > self.config.max_cost_units
             ):
                 break
 
@@ -84,7 +90,8 @@ class SuccessiveHalvingScheduler:
             for cand in order:
                 if (
                     self.config.max_cost_units is not None
-                    and cost_box[0] + float(level.cost_units) > self.config.max_cost_units
+                    and self.config.effective_spent(cost_box) + float(level.cost_units)
+                    > self.config.max_cost_units
                 ):
                     budget_exhausted = True
                     unevaluated.append(cand)

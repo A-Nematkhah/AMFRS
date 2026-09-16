@@ -10,6 +10,31 @@ from typing import Any, Mapping, Optional
 
 from crowd_nav.reward_search.amfrs.primitives import primitive_signatures_block
 from crowd_nav.reward_search.evolver import RewardCandidate
+from crowd_nav.reward_search.scoring import format_score1_diagnostics
+
+def format_candidate_diagnostics(candidate: RewardCandidate) -> str:
+    """Short metrics summary for mutation/crossover prompts (from fidelity history)."""
+    md = candidate.metadata or {}
+    parts: list[str] = []
+    last_metric = md.get("last_metric")
+    if last_metric is not None:
+        parts.append(f"last_metric={last_metric}")
+    raw = md.get("last_raw_metrics") or {}
+    if isinstance(raw, Mapping):
+        for key in ("SR", "CR", "TR", "SD", "PL", "ITR", "score1"):
+            if key in raw:
+                try:
+                    parts.append(f"{key}={float(raw[key]):.3f}")
+                except (TypeError, ValueError):
+                    parts.append(f"{key}={raw[key]}")
+    score1_diag = format_score1_diagnostics(md.get("score1_report"))
+    if score1_diag:
+        parts.append(f"Score1: {score1_diag}")
+    level = md.get("last_fidelity_level")
+    if level:
+        parts.append(f"last_rung={level}")
+    return " — ".join(parts)
+
 
 AMFRS_SYSTEM_PROMPT = (
     "You are an expert in reinforcement learning and robot crowd navigation. "
