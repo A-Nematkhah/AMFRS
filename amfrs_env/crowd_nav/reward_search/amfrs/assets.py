@@ -134,6 +134,29 @@ def check_all_gst(*, root: Optional[str] = None) -> List[AssetStatus]:
     return out
 
 
+def check_python_rvo2() -> AssetStatus:
+    """
+    Real CrowdSim / Stage II+ training imports ``rvo2`` (Python-RVO2).
+
+    Stage I dataset scoring does not need this; F1+ trainers do.
+    """
+    try:
+        import rvo2  # noqa: F401
+    except ImportError as exc:
+        return AssetStatus(
+            "python_rvo2",
+            "(current interpreter)",
+            False,
+            (
+                f"{exc}. Install Python-RVO2 in the same venv as torch "
+                "(Windows: Visual C++ Build Tools, then "
+                "pip install --no-build-isolation _rvo2_src from amfrs_env/)."
+            ),
+        )
+    mod_path = getattr(rvo2, "__file__", "") or "(import ok)"
+    return AssetStatus("python_rvo2", str(mod_path), True, "import ok")
+
+
 def check_stage1_dataset(
     dataset_path: str = "data/stage1_dataset",
     *,
@@ -179,6 +202,9 @@ def check_amfrs_assets(
             check_stage1_dataset(stage1_dataset_path, root=root)
         )
 
+    # Any non-stub run eventually hits CrowdSim → rvo2 at F1+.
+    report.items.append(check_python_rvo2())
+
     if not report.items:
         report.items.append(
             AssetStatus(
@@ -203,7 +229,11 @@ def require_amfrs_assets(**kwargs: Any) -> AssetReport:
         "  1) GST weights: python scripts/fetch_gst_weights.py",
         "     (or copy upstream CrowdNav++ gst_updated/results/... trees)",
         "  2) Stage I dataset: python scripts/collect_stage1_dataset.py",
-        "  3) Or run with --fast / --predict-method none / --score1 smoke for wiring only",
+        "  3) Python-RVO2 (same interpreter as torch):",
+        "     pip install Cython",
+        "     pip install --no-build-isolation _rvo2_src  (from amfrs_env/)",
+        "     Windows needs MSVC Build Tools (Desktop C++ workload).",
+        "  4) Or run with --fast / --predict-method none / --score1 smoke for wiring only",
     ]
     raise FileNotFoundError("\n".join(tips))
 

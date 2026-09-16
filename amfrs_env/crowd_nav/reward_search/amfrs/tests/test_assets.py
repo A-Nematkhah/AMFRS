@@ -38,7 +38,11 @@ def test_none_predict_skips_gst(tmp_path, monkeypatch):
         use_stub=False,
         root=str(tmp_path),
     )
-    assert report.ok
+    # GST not required; rvo2 still required for real trainers unless stub.
+    if any(i.name == "python_rvo2" and not i.ok for i in report.items):
+        assert not report.ok
+    else:
+        assert report.ok
 
 
 def test_require_raises_with_remediation(tmp_path, monkeypatch):

@@ -19,7 +19,9 @@ Cython==0.29.36
 scipy==1.10.1
 protobuf==3.19.6
 tensorflow==2.11.0
-cloudpickle==1.2.2  # gym 0.15.x compatible
+# gym 0.15.x pins cloudpickle~=1.2, but that release IndexErrors on Python 3.12
+# when ShmemVecEnv (num_processes>1) cloudpickles env factories. Use 3.x.
+cloudpickle>=3.0,<4
 tqdm==4.66.1
 
 # AMFRS Algorithm 1 (optional — only for --llm groq)

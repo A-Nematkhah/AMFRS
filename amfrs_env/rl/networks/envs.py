@@ -103,6 +103,13 @@ def make_vec_envs(env_name,
                   config=None,
                   ax=None, test_case=-1, wrap_pytorch=True, pretext_wrapper=False,
                   reward_fn=None):
+    # Cap BLAS threads before spawning workers (avoids N×OpenBLAS OOM on Windows).
+    try:
+        from crowd_nav.reward_search.parallelism import configure_worker_thread_env
+
+        configure_worker_thread_env()
+    except Exception:  # noqa: BLE001
+        pass
     envs = [
         make_env(env_name, seed, i, log_dir, allow_early_resets, config=config,
                  envNum=num_processes, ax=ax, test_case=test_case,

@@ -237,6 +237,7 @@ def _failed_train_result(
         rung,
         type(exc).__name__,
         exc,
+        exc_info=logger.isEnabledFor(logging.DEBUG),
     )
     raw = {
         "SR": 0.0,

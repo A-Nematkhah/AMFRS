@@ -440,6 +440,9 @@ class RealPolicyTrainer(PolicyTrainer):
         )
         torch.manual_seed(algo_args.seed)
         torch.set_num_threads(1)
+        from crowd_nav.reward_search.parallelism import configure_worker_thread_env
+
+        configure_worker_thread_env()
 
         reward_fn = candidate.reward_fn
         if hasattr(reward_fn, "set_soft_nonfinite"):
