@@ -7,14 +7,12 @@ finalist ranking unless ``allow_stub_fallback=True``.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import replace
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from crowd_nav.reward_search.evolver import RewardCandidate
 from crowd_nav.reward_search.selection import navigation_scalar_from_dict
-
-logger = logging.getLogger(__name__)
+from crowd_nav.reward_search import console
 
 
 def robustness_scalar(by_policy: Mapping[str, Mapping[str, Any]]) -> float:
@@ -98,11 +96,14 @@ def _run_policy_sweep_real(
     seed: int = 425,
     output_root: str = "trained_models/amfrs_robustness",
     randomization_regime: str = "without_random",
+    num_processes: int = 1,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Short real A2C train+eval per human policy (expensive).
 
     Uses ``predict_method`` as given (prefer ``none`` if GST missing).
+    Default ``num_processes=1`` avoids GST tensor-shape mismatches seen with
+    tiny ``human_num`` under multi-proc stacking.
     """
     from crowd_nav.reward_search.regime import (
         EVOLUTION_ENV_NAME_INFERRED,
@@ -120,6 +121,7 @@ def _run_policy_sweep_real(
     )
     out: Dict[str, Dict[str, Any]] = {}
     trainer = RealPolicyTrainer()
+    nproc = max(1, int(num_processes))
     for i, pol in enumerate(policies):
         cfg = Stage2Config(
             train_env_steps=int(train_steps),
@@ -133,6 +135,7 @@ def _run_policy_sweep_real(
             output_root=f"{output_root}/{pol}",
             n_eval_seeds=1,
             accept_reject_refine=False,
+            num_processes=nproc,
         )
         # Human policy is applied inside env Config; Stage2Config does not
         # expose it, so we patch via a thin monkeyhook on _make_proxy_env_config.
@@ -147,7 +150,10 @@ def _run_policy_sweep_real(
 
         stage2_mod._make_proxy_env_config = _make_cfg  # type: ignore[assignment]
         try:
-            logger.info("Robustness real sweep policy=%s candidate=%s", pol, candidate.candidate_id)
+            console.status(
+                f"sweep policy={pol}  candidate={candidate.candidate_id}  nproc={nproc}",
+                stage="robust",
+            )
             metrics = trainer.train_and_eval(candidate, round_index=0, config=cfg)
             raw = metrics.as_dict()
             raw["policy"] = pol
@@ -172,6 +178,7 @@ def run_policy_sweep(
     seed: int = 425,
     output_root: str = "trained_models/amfrs_robustness",
     randomization_regime: str = "without_random",
+    num_processes: int = 1,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Evaluate candidate under different ``humans.policy`` settings.
@@ -194,14 +201,15 @@ def run_policy_sweep(
             seed=seed,
             output_root=output_root,
             randomization_regime=randomization_regime,
+            num_processes=num_processes,
         )
     except Exception as exc:  # noqa: BLE001
         if not allow_stub_fallback:
             raise
-        logger.warning(
-            "Real policy sweep failed (%s); falling back to stub metrics "
+        console.warn(
+            f"real policy sweep failed ({exc}); falling back to stub metrics "
             "(allow_stub_fallback=True)",
-            exc,
+            stage="robust",
         )
         out = run_policy_sweep_stub(candidate, policies=policies)
         for v in out.values():

@@ -5,7 +5,6 @@ Axis 1 — fidelity ladder (CPU-safe stubs; real trainers via deferred import).
 from __future__ import annotations
 
 import hashlib
-import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -13,8 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from crowd_nav.reward_search.evolver import RewardCandidate
 from crowd_nav.reward_search.selection import navigation_scalar_from_dict
-
-logger = logging.getLogger(__name__)
+from crowd_nav.reward_search import console
 
 
 @dataclass(frozen=True)
@@ -231,13 +229,10 @@ def _failed_train_result(
     exc: BaseException,
 ) -> FidelityResult:
     """Eliminate a candidate when real train/eval crashes (e.g. LLM reward → -inf)."""
-    logger.warning(
-        "Real train failed for %s at %s (%s: %s); metric=-inf",
-        candidate.candidate_id,
-        rung,
-        type(exc).__name__,
-        exc,
-        exc_info=logger.isEnabledFor(logging.DEBUG),
+    console.warn(
+        f"real train failed for {candidate.candidate_id} at {rung} "
+        f"({type(exc).__name__}: {exc}); metric=-inf",
+        stage="train",
     )
     raw = {
         "SR": 0.0,
@@ -272,10 +267,9 @@ def _prior_metric_is_non_finite(candidate: RewardCandidate) -> bool:
 def _skipped_prior_fail_result(
     candidate: RewardCandidate, *, cost: float, rung: str
 ) -> FidelityResult:
-    logger.info(
-        "Skip real train for %s at %s (prior metric non-finite)",
-        candidate.candidate_id,
-        rung,
+    console.status(
+        f"skip real train for {candidate.candidate_id} at {rung} (prior metric non-finite)",
+        stage="train",
     )
     return FidelityResult(
         metric=float("-inf"),
@@ -327,12 +321,10 @@ def _evaluate_real_stage2(
         n_eval_seeds=1,
         accept_reject_refine=False,
     )
-    logger.info(
-        "Real Stage II %s steps=%s predict=%s device=%s",
-        candidate.candidate_id,
-        steps,
-        cfg.predict_method,
-        cfg.device,
+    console.status(
+        f"{candidate.candidate_id}  steps={steps}  predict={cfg.predict_method}  "
+        f"device={cfg.device}",
+        stage=rung,
     )
     try:
         metrics = RealPolicyTrainer().train_and_eval(
@@ -374,12 +366,10 @@ def _evaluate_real_stage3(
         output_root=os_path_join(ctx.output_root, "stage3"),
         accept_reject_refine=False,
     )
-    logger.info(
-        "Real Stage III %s steps=%s predict=%s device=%s",
-        candidate.candidate_id,
-        cfg.train_env_steps,
-        cfg.predict_method,
-        cfg.device,
+    console.status(
+        f"{candidate.candidate_id}  steps={cfg.train_env_steps}  "
+        f"predict={cfg.predict_method}  device={cfg.device}",
+        stage="F3_full_ppo",
     )
     try:
         bundle = RealPolicyTrainer().train_and_eval(

@@ -10,6 +10,27 @@ from crowd_nav.reward_search.amfrs.crossover import (
 from crowd_nav.reward_search.evolver import RewardCandidate
 
 
+def test_format_candidate_diagnostics_reads_last_fidelity_alias():
+    cand = RewardCandidate(
+        candidate_id="p0",
+        code="def compute_reward(state, memory):\n    return 1.0\n",
+        valid=True,
+        metadata={
+            "last_metric": -0.67,
+            "last_fidelity": "F2_full_a2c",
+            "last_raw_metrics": {"SR": 0.1, "CR": 0.2},
+            "static_report": {
+                "scale_drift_ratio": 12.5,
+                "notes": ["scale_drift"],
+            },
+        },
+    )
+    diag = format_candidate_diagnostics(cand)
+    assert "last_rung=F2_full_a2c" in diag
+    assert "scale_drift=12.5x" in diag
+    assert "WARN scale_drift" in diag
+
+
 def test_format_candidate_diagnostics_from_raw_metrics():
     cand = RewardCandidate(
         candidate_id="p0",

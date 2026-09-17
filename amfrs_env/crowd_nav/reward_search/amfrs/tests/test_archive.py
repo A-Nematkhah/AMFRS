@@ -35,6 +35,22 @@ def test_elite_grid_insert_replace():
     assert grid.qd_score() == 0.9
 
 
+def test_unique_elites_by_id_keeps_best_fitness():
+    grid = EliteGrid((3, 3))
+    weak = RewardCandidate(candidate_id="x", code="weak", valid=True, score=-0.8)
+    strong = RewardCandidate(candidate_id="x", code="strong", valid=True, score=-0.2)
+    other = RewardCandidate(candidate_id="y", code="y", valid=True, score=-0.5)
+    grid.try_insert(weak, (0, 0), -0.8)
+    grid.try_insert(strong, (1, 0), -0.2)
+    grid.try_insert(other, (2, 0), -0.5)
+    assert len(grid.all_elites()) == 3
+    uniq = grid.unique_elites_by_id()
+    assert len(uniq) == 2
+    by_id = {c.candidate_id: c for c in uniq}
+    assert by_id["x"].code == "strong"
+    assert by_id["y"].candidate_id == "y"
+
+
 def test_archive_json_roundtrip(tmp_path):
     grid = EliteGrid((2, 2))
     c = RewardCandidate(candidate_id="x", code="def f():\n pass", valid=True, metadata={"k": 1})
@@ -43,6 +59,44 @@ def test_archive_json_roundtrip(tmp_path):
     grid.to_json(str(path))
     loaded = EliteGrid.from_json(str(path))
     assert loaded.get((1, 0)).candidate_id == "x"
+
+
+def test_latest_by_candidate_id_tracks_worse_reeval(tmp_path):
+    grid = EliteGrid((2, 2))
+    first = RewardCandidate(
+        candidate_id="x",
+        code="first",
+        valid=True,
+        score=-0.5,
+        metadata={"fidelity_history": [{"level": "F1_short_a2c"}]},
+    )
+    second = RewardCandidate(
+        candidate_id="x",
+        code="second",
+        valid=True,
+        score=-0.9,
+        metadata={"fidelity_history": [{"level": "F1_short_a2c"}, {"level": "F2_full_a2c"}]},
+    )
+    assert grid.try_insert(first, (0, 0), -0.5) is True
+    assert grid.get((0, 0)).code == "first"
+    assert grid.get_latest("x").code == "first"
+
+    # Worse re-eval: cell keeps the better fitness snapshot, latest tracks second.
+    assert grid.try_insert(second, (0, 0), -0.9) is False
+    assert grid.get((0, 0)).code == "first"
+    assert grid.get((0, 0)).score == -0.5
+    latest = grid.get_latest("x")
+    assert latest is not None
+    assert latest.code == "second"
+    assert latest.score == -0.9
+    assert len((latest.metadata or {}).get("fidelity_history") or []) == 2
+
+    path = tmp_path / "arch_latest.json"
+    grid.to_json(str(path))
+    loaded = EliteGrid.from_json(str(path))
+    assert loaded.get((0, 0)).code == "first"
+    assert loaded.get_latest("x").code == "second"
+    assert loaded.get_latest("x").score == -0.9
 
 
 def test_pipeline_coverage_nondecreasing(tmp_path):

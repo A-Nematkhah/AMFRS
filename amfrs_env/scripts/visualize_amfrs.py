@@ -7,12 +7,16 @@ episodes with matplotlib rendering, optionally saves slide PNGs and a GIF.
 
 Examples::
 
+    # Static archive heatmap (no GPU)
+    python scripts/plot_amfrs_archive.py --run-dir results/amfrs_12h
+
     # Headless: save slides + GIF for 2 episodes
-    python scripts/visualize_amfrs.py --run-dir results/run_1to2h \\
-        --episodes 2 --save-slides --gif --no-display
+    python scripts/visualize_amfrs.py --run-dir results/amfrs_12h \\
+        --stage stage2 --episodes 2 --gif --human-num 15
 
     # Interactive window
-    python scripts/visualize_amfrs.py --run-dir results/run_1to2h --episodes 1
+    python scripts/visualize_amfrs.py --run-dir results/amfrs_12h \\
+        --stage stage2 --episodes 1 --human-num 15
 """
 
 from __future__ import annotations
@@ -61,26 +65,108 @@ def _resolve_path(run_dir: str, path: str) -> str:
 def _find_checkpoint(run_dir: str, cand: Dict[str, Any], stage: str) -> str:
     md = cand.get("metadata") or {}
     ckpt = md.get("checkpoint_path")
+    if not ckpt:
+        raw = md.get("last_raw_metrics") or {}
+        if isinstance(raw, dict):
+            ckpt = raw.get("checkpoint_path")
     if ckpt:
         resolved = _resolve_path(run_dir, str(ckpt))
         if os.path.isfile(resolved):
             return resolved
     cid = str(cand.get("candidate_id", ""))
-    # Prefer earliest round folder (r00_*) when multiple exist — best-ever
-    # policies are often earlier than last-round refine folders.
-    pattern = os.path.join(run_dir, f"{stage}_train", f"*_{cid}", "checkpoints", "*.pt")
-    hits = sorted(glob.glob(pattern))
-    if hits:
-        return hits[0]
-    # Refined ids may be stored without _v2 folder suffix mismatch — try contains.
-    folders = sorted(glob.glob(os.path.join(run_dir, f"{stage}_train", f"*{cid}*")))
+    # Prefer latest .pt (more env-steps) within a candidate folder.
+    # Alg1: stage2_train / stage3_train — AMFRS: trained_models/stage2|stage3
+    patterns = [
+        os.path.join(run_dir, f"{stage}_train", f"*_{cid}", "checkpoints", "*.pt"),
+        os.path.join(run_dir, "trained_models", stage, f"*_{cid}", "checkpoints", "*.pt"),
+        os.path.join(run_dir, "trained_models", stage, f"*_{cid}_*", "checkpoints", "*.pt"),
+        os.path.join(run_dir, "robustness", "*", f"*_{cid}*", "checkpoints", "*.pt"),
+    ]
+    for pattern in patterns:
+        hits = sorted(glob.glob(pattern))
+        if hits:
+            return hits[-1]
+    folders: List[str] = []
+    for root in (
+        os.path.join(run_dir, f"{stage}_train"),
+        os.path.join(run_dir, "trained_models", stage),
+    ):
+        folders.extend(sorted(glob.glob(os.path.join(root, f"*{cid}*"))))
     for folder in folders:
         pts = sorted(glob.glob(os.path.join(folder, "checkpoints", "*.pt")))
         if pts:
-            return pts[0]
+            return pts[-1]
     raise FileNotFoundError(
-        f"No checkpoint for candidate={cid} under {run_dir}/{stage}_train "
-        f"(looked for metadata.checkpoint_path and glob {pattern})"
+        f"No checkpoint for candidate={cid} under {run_dir} "
+        f"(tried {stage}_train and trained_models/{stage})"
+    )
+
+
+def _load_run_config(run_dir: str) -> Dict[str, Any]:
+    """Alg1 writes config.json; AMFRS nests config inside amfrs_manifest.json."""
+    cfg_path = os.path.join(run_dir, "config.json")
+    if os.path.isfile(cfg_path):
+        return _load_json(cfg_path)
+    man_path = os.path.join(run_dir, "amfrs_manifest.json")
+    if os.path.isfile(man_path):
+        man = _load_json(man_path)
+        cfg = man.get("config")
+        if isinstance(cfg, dict):
+            return cfg
+    return {}
+
+
+def _resolve_candidate_path(run_dir: str, candidate: Optional[str]) -> str:
+    """
+    Prefer explicit --candidate, then Alg1 finals, then AMFRS archive best cell.
+    Writes a temp JSON under ``visuals/_candidate.json`` when resolving from archive.
+    """
+    if candidate:
+        path = candidate if os.path.isabs(candidate) else os.path.join(run_dir, candidate)
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+        raise FileNotFoundError(f"candidate JSON not found: {candidate}")
+
+    for name in ("final_candidate.json", "best_stage3.json", "best_stage2.json"):
+        p = os.path.join(run_dir, name)
+        if os.path.isfile(p):
+            return p
+
+    man_path = os.path.join(run_dir, "amfrs_manifest.json")
+    arch_path = os.path.join(run_dir, "map_elites_archive.json")
+    best_id = None
+    if os.path.isfile(man_path):
+        best_id = _load_json(man_path).get("best_id")
+    if os.path.isfile(arch_path):
+        arch = _load_json(arch_path)
+        cells = list(arch.get("cells") or [])
+        chosen = None
+        if best_id is not None:
+            for cell in cells:
+                if str(cell.get("candidate_id")) == str(best_id):
+                    chosen = cell
+                    break
+        if chosen is None and cells:
+            chosen = max(cells, key=lambda c: float(c.get("fitness", float("-inf"))))
+        if chosen is not None:
+            payload = {
+                "candidate_id": chosen.get("candidate_id"),
+                "code": chosen.get("code"),
+                "score": chosen.get("score"),
+                "valid": True,
+                "origin": "archive",
+                "parent_ids": [],
+                "validation_error": None,
+                "metadata": chosen.get("metadata") or {},
+            }
+            out = os.path.join(run_dir, "visuals", "_candidate.json")
+            _ensure_parent(out)
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            return out
+
+    raise FileNotFoundError(
+        "No candidate JSON found (final_candidate.json / archive best missing)"
     )
 
 
@@ -151,9 +237,7 @@ def visualize(
     from rl.networks.envs import make_vec_envs
     from rl.networks.model import Policy
 
-    run_cfg = _load_json(os.path.join(run_dir, "config.json")) if os.path.isfile(
-        os.path.join(run_dir, "config.json")
-    ) else {}
+    run_cfg = _load_run_config(run_dir)
     cand_payload = _load_json(candidate_path)
     candidate = load_candidate_dict(cand_payload)
     if candidate.reward_fn is None:
@@ -342,16 +426,21 @@ def main() -> int:
         print(f"error: run dir not found: {run_dir}", file=sys.stderr)
         return 1
 
-    cand = args.candidate
-    if cand is None:
-        for name in ("final_candidate.json", "best_stage3.json", "best_stage2.json"):
-            p = os.path.join(run_dir, name)
-            if os.path.isfile(p):
-                cand = p
-                break
-    if cand is None or not os.path.isfile(cand):
-        print("error: no candidate JSON found", file=sys.stderr)
+    try:
+        cand = _resolve_candidate_path(run_dir, args.candidate)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    # Prefer stage3 when asked; fall back to stage2 if no F3 checkpoint.
+    stage = args.stage
+    if stage == "stage3":
+        probe = _load_json(cand)
+        try:
+            _find_checkpoint(run_dir, probe, "stage3")
+        except FileNotFoundError:
+            print("[viz] no stage3 checkpoint; falling back to stage2", flush=True)
+            stage = "stage2"
 
     no_display = bool(args.no_display or args.gif or args.save_slides)
     # If user only wants live view, keep display.
@@ -362,7 +451,7 @@ def main() -> int:
         info = visualize(
             run_dir=run_dir,
             candidate_path=os.path.abspath(cand),
-            stage=args.stage,
+            stage=stage,
             episodes=int(args.episodes),
             test_case=int(args.test_case),
             device_pref=args.device,

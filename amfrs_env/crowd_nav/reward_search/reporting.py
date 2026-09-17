@@ -301,12 +301,31 @@ def candidate_to_dict(cand) -> Dict[str, Any]:
     return out
 
 
-def load_candidate_dict(d: Dict[str, Any]):
+def load_candidate_dict(
+    d: Dict[str, Any],
+    *,
+    extra_namespace: Optional[Dict[str, Any]] = None,
+):
     from crowd_nav.reward_search.evolver import RewardCandidate
     from crowd_nav.reward_search.sandbox import RewardValidator
+    from crowd_nav.reward_search.sandbox.config import SandboxConfig
 
     code = d["code"]
-    reward_fn, err = RewardValidator().try_validate(code)
+    # AMFRS candidates call named primitives (goal_progress, …); inject when asked
+    # or when the body clearly needs them and the caller did not opt out.
+    ns = dict(extra_namespace) if extra_namespace is not None else None
+    if ns is None and "goal_progress(" in str(code):
+        try:
+            from crowd_nav.reward_search.amfrs.primitives import PRIMITIVE_REGISTRY
+
+            ns = dict(PRIMITIVE_REGISTRY)
+        except Exception:  # noqa: BLE001
+            ns = None
+    if ns:
+        validator = RewardValidator(config=SandboxConfig(extra_namespace=ns))
+    else:
+        validator = RewardValidator()
+    reward_fn, err = validator.try_validate(code)
     return RewardCandidate(
         candidate_id=d.get("candidate_id", "loaded"),
         code=code,

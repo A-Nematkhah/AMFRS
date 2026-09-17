@@ -104,104 +104,100 @@ class AMFRSRunConfig:
         self.llm_provider_b = "seed"
         self.static_gate_n_states = 32
 
-    def apply_short_gpu_profile(self) -> None:
-        """
-        Real trainers, aimed at ~15–30 min on one GPU (order-of-magnitude).
-
-        Skips full PPO (stops at F2 A2C) and robustness sweep; fewer humans
-        and smaller pop/gen. Timing varies with GPU and GST on/off.
-        """
+    def _enable_full_amfrs_stack(self) -> None:
+        """Every real profile: F0→F3, GST, MAP-Elites, bandit, ensemble, robustness."""
         self.fast = False
         self.use_stub_trainers = False
-        self.population_size = 4
-        self.generations = 1
         self.score1_mode = "dataset"
-        self.stage2_train_steps = 8_000
-        self.stage2_train_steps_short = 2_000
-        self.stage2_eval_episodes = 20
-        self.stage3_train_steps = 15_000
-        self.stage3_eval_episodes = 30
-        self.max_cost_units_per_generation = 200.0
-        self.illumination_max_rung = "F1_short_a2c"
-        self.final_rung = "F2_full_a2c"
-        self.run_robustness_sweep = False
-        self.predict_method = "none"
-        self.human_num = 5
-        self.num_processes = 4
+        self.selection_mode = "map_elites"
+        self.illumination_max_rung = "F2_full_a2c"
+        self.final_rung = "F3_full_ppo"
+        self.final_rung_max_cost_units = None
+        self.predict_method = "inferred"
+        self.use_bandit = True
+        self.use_ensemble_critique = True
+        self.use_retrieval_memory = True
+        self.run_robustness_sweep = True
+        self.robustness_policies = ("orca", "social_force")
         self.device = "cuda"
         self.allow_seed_llm = True
-        self.llm_provider = "seed"
-        self.llm_provider_b = "seed"
+        self.static_gate_n_states = 64
 
-    def apply_6h_gpu_profile(self) -> None:
+    def apply_3h_gpu_profile(self) -> None:
         """
-        Real trainers aimed at ~4–8 h on one GPU (order-of-magnitude).
+        Full stack, ~3 h on one GPU (order-of-magnitude). ``human_num=2``.
 
-        Includes GST (inferred), illumination through F2, final F3 PPO, and
-        multi-policy robustness. Tuned from short-run timings (~5 min for
-        pop=4/gen=1/F2/no-GST); wall-clock varies with GPU and LLM latency.
+        Budgets scaled from a ~48 min end-to-end probe so wall-clock lands
+        near 2.5–3.5 h after unique-elite F3 (no duplicate PPO) + robustness.
         """
-        self.fast = False
-        self.use_stub_trainers = False
+        self._enable_full_amfrs_stack()
         self.population_size = 8
         self.generations = 3
-        self.score1_mode = "dataset"
-        # F1 / F2 / F3 budgets (env steps)
-        self.stage2_train_steps_short = 12_500
-        self.stage2_train_steps = 40_000
-        self.stage2_eval_episodes = 40
+        self.human_num = 2
+        self.num_processes = 4
+        self.stage2_train_steps_short = 20_000
+        self.stage2_train_steps = 50_000
+        self.stage2_eval_episodes = 30
         self.stage3_train_steps = 120_000
-        self.stage3_eval_episodes = 80
-        self.max_cost_units_per_generation = 400.0
-        self.illumination_max_rung = "F2_full_a2c"
-        self.final_rung = "F3_full_ppo"
-        self.final_rung_max_cost_units = None
-        self.run_robustness_sweep = True
-        self.predict_method = "inferred"
+        self.stage3_eval_episodes = 50
+        self.max_cost_units_per_generation = 700.0
+        self.llm_provider = "seed"
+        self.llm_provider_b = "seed"
+        self.extra["profile"] = "3h"
+
+    def apply_18h_gpu_profile(self) -> None:
+        """
+        Full stack, ~18 h on one GPU (order-of-magnitude). ``human_num=10``.
+        """
+        self._enable_full_amfrs_stack()
+        self.population_size = 12
+        self.generations = 6
         self.human_num = 10
         self.num_processes = 4
-        self.device = "cuda"
-        self.use_bandit = False
-        self.use_ensemble_critique = False
-        self.allow_seed_llm = True
+        self.stage2_train_steps_short = 16_000
+        self.stage2_train_steps = 45_000
+        self.stage2_eval_episodes = 40
+        self.stage3_train_steps = 180_000
+        self.stage3_eval_episodes = 80
+        self.max_cost_units_per_generation = 600.0
         self.llm_provider = "seed"
         self.llm_provider_b = "seed"
-        self.static_gate_n_states = 64
+        self.extra["profile"] = "18h"
+
+    def apply_full_gpu_profile(self) -> None:
+        """
+        Full stack, long paper-scale run. ``human_num=20``.
+
+        Largest pop/gen and F3 budget; wall-clock is a day-plus on one GPU
+        and varies with GST + LLM latency.
+        """
+        self._enable_full_amfrs_stack()
+        self.population_size = 16
+        self.generations = 10
+        self.human_num = 20
+        self.num_processes = 4
+        self.stage2_train_steps_short = 25_000
+        self.stage2_train_steps = 80_000
+        self.stage2_eval_episodes = 50
+        self.stage3_train_steps = 500_000
+        self.stage3_eval_episodes = 200
+        self.max_cost_units_per_generation = 800.0
+        self.llm_provider = "seed"
+        self.llm_provider_b = "seed"
+        self.extra["profile"] = "full"
+
+    # Aliases for older CLI names.
+    def apply_short_gpu_profile(self) -> None:
+        self.apply_3h_gpu_profile()
+
+    def apply_2h_gpu_profile(self) -> None:
+        self.apply_3h_gpu_profile()
+
+    def apply_6h_gpu_profile(self) -> None:
+        self.apply_18h_gpu_profile()
 
     def apply_12h_gpu_profile(self) -> None:
-        """
-        Real trainers aimed at ~10–14 h on one GPU (order-of-magnitude).
-
-        Same shape as 6h (GST + F2 illumination + F3 PPO + robustness) with
-        more population/generations and higher train/eval budgets. Prefer
-        ``--llm groq`` (or ollama). Wall-clock varies with GPU and LLM latency.
-        """
-        self.fast = False
-        self.use_stub_trainers = False
-        self.population_size = 12
-        self.generations = 5
-        self.score1_mode = "dataset"
-        # F1 / F2 / F3 budgets (env steps)
-        self.stage2_train_steps_short = 20_000
-        self.stage2_train_steps = 60_000
-        self.stage2_eval_episodes = 50
-        self.stage3_train_steps = 250_000
-        self.stage3_eval_episodes = 100
-        self.max_cost_units_per_generation = 600.0
-        self.illumination_max_rung = "F2_full_a2c"
-        self.final_rung = "F3_full_ppo"
-        self.final_rung_max_cost_units = None
-        self.run_robustness_sweep = True
-        self.predict_method = "inferred"
-        self.human_num = 15
-        self.num_processes = 4
-        self.device = "cuda"
-        self.use_bandit = False
-        self.use_ensemble_critique = False
-        self.allow_seed_llm = True
-        self.llm_provider = "seed"
-        self.llm_provider_b = "seed"
-        self.static_gate_n_states = 64
+        self.apply_18h_gpu_profile()
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -11,7 +11,13 @@ from typing import Mapping, Sequence, Tuple
 @dataclass(frozen=True)
 class DescriptorSpaceConfig:
     path_efficiency_edges: Tuple[float, ...] = (1.0, 1.2, 1.5, 2.0, 3.0)
-    social_margin_edges: Tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 2.0)
+    # Recalibrated from results/amfrs_12h (real 12h GPU run): both archived
+    # elites had SD ≈ 0.3857 and 0.4057, which both fell in the old placeholder
+    # bin [0.25, 0.5) and collapsed the 4x4 grid's y-axis to one usable bin
+    # (archive_coverage stuck at 0.125). These edges put those two values in
+    # different bins while leaving headroom below/above. Revisit once a later
+    # run (with scale-drift soft-flagging) produces a wider real SD spread.
+    social_margin_edges: Tuple[float, ...] = (0.15, 0.30, 0.35, 0.40, 0.50)
 
 
 def _bin_index(value: float, edges: Sequence[float]) -> int:

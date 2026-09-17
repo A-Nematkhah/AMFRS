@@ -1,10 +1,13 @@
 
 from gst_updated.src.gumbel_social_transformer.st_model import st_model
 from os.path import join, isdir
+import logging
 import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+
+logger = logging.getLogger(__name__)
 
 def seq_to_graph(seq_, seq_rel, attn_mech='rel_conv'):
     """
@@ -42,9 +45,7 @@ class CrowdNavPredInterfaceMultiEnv(object):
         )
         self.model.load_state_dict(model_checkpoint['model_state_dict'])
         self.model.eval()
-        print("LOADED MODEL")
-        print("device: ", device)
-        print()
+        logger.debug("LOADED MODEL device=%s", device)
 
     def forward(self, input_traj,input_binary_mask, sampling = True):
         """

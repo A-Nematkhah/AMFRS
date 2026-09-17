@@ -6,19 +6,19 @@ Examples (from ``amfrs_env/``)::
 
     python scripts/run_amfrs.py --fast --output-dir results/amfrs_fast
 
-    # Real trainers without GST (obs = none):
-    python scripts/run_amfrs.py --allow-seed-llm --predict-method none \\
-        --score1 smoke --device cpu --output-dir results/amfrs_real_none
+    python scripts/run_amfrs.py --profile 3h --llm groq --device cuda \\
+        --output-dir results/amfrs_3h
 
-    # Real trainers with GST (after scripts/fetch_gst_weights.py):
-    python scripts/run_amfrs.py --allow-seed-llm --predict-method inferred \\
-        --score1 smoke --device cuda --output-dir results/amfrs_real_gst
+    python scripts/run_amfrs.py --profile 18h --llm groq --device cuda \\
+        --output-dir results/amfrs_18h
+
+    python scripts/run_amfrs.py --profile full --llm groq --device cuda \\
+        --output-dir results/amfrs_full
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import sys
 
@@ -39,6 +39,7 @@ def main() -> int:
         configure_run_temp,
         configure_worker_thread_env,
     )
+    from crowd_nav.reward_search.console import configure_amfrs_logging
 
     configure_worker_thread_env()
 
@@ -50,11 +51,11 @@ def main() -> int:
         "--profile",
         type=str,
         default=None,
-        choices=["short", "6h", "12h"],
+        choices=["3h", "18h", "full", "2h", "short", "6h", "12h"],
         help=(
-            "Named budget profile. 'short' ≈ 15–30 min real A2C (no F3/GST). "
-            "'6h' ≈ 4–8 h with GST, F2 illumination, F3 PPO, robustness. "
-            "'12h' ≈ 10–14 h (larger pop/gen and train budgets)."
+            "Named budget profile (all run F0→F3 + GST + robustness + bandit "
+            "+ ensemble). '3h' ≈ 2–3 h, H=2. '18h' ≈ 18 h, H=10. "
+            "'full' long paper-scale, H=20. Aliases: 2h/short→3h, 6h/12h→18h."
         ),
     )
     parser.add_argument(
@@ -120,8 +121,18 @@ def main() -> int:
         print("Use either --fast or --profile, not both.", file=sys.stderr)
         return 2
 
-    # Named profiles may use --llm seed for local wiring; real 6h/12h runs should pass --llm groq.
-    allow_seed = bool(args.allow_seed_llm or args.profile in {"short", "6h", "12h"})
+    named_profiles = {
+        "3h": "apply_3h_gpu_profile",
+        "2h": "apply_3h_gpu_profile",
+        "short": "apply_3h_gpu_profile",
+        "18h": "apply_18h_gpu_profile",
+        "6h": "apply_18h_gpu_profile",
+        "12h": "apply_18h_gpu_profile",
+        "full": "apply_full_gpu_profile",
+    }
+
+    # Named profiles may use --llm seed for local wiring; real runs should pass --llm groq.
+    allow_seed = bool(args.allow_seed_llm or args.profile in named_profiles)
     if (
         not args.fast
         and str(args.llm).strip().lower() == "seed"
@@ -129,16 +140,13 @@ def main() -> int:
     ):
         print(
             "Refusing non-fast AMFRS with --llm seed. "
-            "Pass a real provider or --allow-seed-llm / --fast / --profile short|6h|12h.",
+            "Pass a real provider or --allow-seed-llm / --fast / "
+            "--profile 3h|18h|full.",
             file=sys.stderr,
         )
         return 2
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    configure_amfrs_logging(verbose=bool(args.verbose))
 
     # Protect Config.get_args() from our CLI when real trainers parse argv.
     sanitized = [sys.argv[0], "--seed", str(args.seed)]
@@ -160,27 +168,16 @@ def main() -> int:
         cfg.apply_fast_profile()
         cfg.output_dir = args.output_dir
         cfg.seed = args.seed
-    if args.profile == "short":
-        cfg.apply_short_gpu_profile()
+    if args.profile in named_profiles:
+        getattr(cfg, named_profiles[args.profile])()
         cfg.output_dir = args.output_dir
         cfg.seed = args.seed
         cfg.device = args.device
         cfg.llm_provider = args.llm
         cfg.allow_seed_llm = True
-    if args.profile == "6h":
-        cfg.apply_6h_gpu_profile()
-        cfg.output_dir = args.output_dir
-        cfg.seed = args.seed
-        cfg.device = args.device
-        cfg.llm_provider = args.llm
-        cfg.allow_seed_llm = True
-    if args.profile == "12h":
-        cfg.apply_12h_gpu_profile()
-        cfg.output_dir = args.output_dir
-        cfg.seed = args.seed
-        cfg.device = args.device
-        cfg.llm_provider = args.llm
-        cfg.allow_seed_llm = True
+        # Second critic: same provider unless the user already set a distinct B.
+        if cfg.use_ensemble_critique and str(cfg.llm_provider_b).strip().lower() == "seed":
+            cfg.llm_provider_b = args.llm
     if args.use_stub:
         cfg.use_stub_trainers = True
         if args.score1 is None and not args.fast:
@@ -214,19 +211,10 @@ def main() -> int:
             return 3
 
     try:
-        artifacts = AMFRSPipeline(cfg).run()
+        AMFRSPipeline(cfg).run()
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-
-    print(
-        f"[amfrs] done | accepted={len(artifacts.accepted_candidates)} "
-        f"rejected={len(artifacts.rejected)} "
-        f"best={artifacts.best.candidate_id if artifacts.best else None} "
-        f"stub={cfg.use_stub_trainers or cfg.fast} "
-        f"profile={args.profile or ('fast' if args.fast else 'default')} "
-        f"-> {cfg.output_dir}"
-    )
     return 0
 
 

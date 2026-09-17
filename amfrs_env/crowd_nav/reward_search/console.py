@@ -14,11 +14,105 @@ import os
 import sys
 import time
 from contextlib import contextmanager
-from typing import Any, Iterable, Iterator, Optional, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 _VERBOSE = False
+
+# Third-party loggers that spam INFO (HTTP 200, sim setup, GST construction).
+_QUIET_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "httpcore.http11",
+    "httpcore.connection",
+    "openai",
+    "groq",
+    "urllib3",
+    "baselines",
+    "gym",
+    "gym.logger",
+    "matplotlib",
+    "PIL",
+    "crowd_sim",
+    "gst_updated",
+)
+
+
+class _DropNoiseFilter(logging.Filter):
+    """Hide known-noisy library lines while keeping AMFRS review output."""
+
+    _NEEDLES = (
+        "Box bound precision lowered",
+        "WARN: Box bound",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001
+            return True
+        return not any(needle in msg for needle in self._NEEDLES)
+
+
+def configure_amfrs_logging(*, verbose: bool = False) -> None:
+    """
+    One clean stdout stream for AMFRS runs.
+
+    Python's default logging goes to stderr, which PowerShell paints red
+    (NativeCommandError) even for INFO. HTTP client libraries also log every
+    Groq 200 at INFO. This keeps the terminal to AMFRS review lines.
+    """
+    import warnings
+
+    set_verbose(verbose)
+    root = logging.getLogger()
+    level = logging.DEBUG if verbose else logging.INFO
+    formatter = logging.Formatter(
+        "%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%H:%M:%S"
+    )
+    noise_filter = _DropNoiseFilter()
+    # Drop default stderr handlers (PowerShell paints those INFO lines red).
+    # Keep pytest/other capture handlers intact.
+    for existing in list(root.handlers):
+        stream = getattr(existing, "stream", None)
+        if isinstance(existing, logging.StreamHandler) and stream is sys.stderr:
+            root.removeHandler(existing)
+    stdout_handlers = [
+        h
+        for h in root.handlers
+        if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout
+    ]
+    if stdout_handlers:
+        handler = stdout_handlers[0]
+        handler.setLevel(level)
+        handler.setFormatter(formatter)
+    else:
+        handler = logging.StreamHandler(stream=sys.stdout)
+        handler.setLevel(level)
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+    if not any(isinstance(f, _DropNoiseFilter) for f in handler.filters):
+        handler.addFilter(noise_filter)
+    root.setLevel(level)
+    logging.captureWarnings(True)
+    for name in _QUIET_LOGGERS:
+        noisy = logging.getLogger(name)
+        noisy.setLevel(logging.DEBUG if verbose else logging.WARNING)
+        noisy.propagate = True
+    warnings.filterwarnings("ignore", message=r".*Box bound precision lowered.*")
+    warnings.filterwarnings("ignore", category=UserWarning, module=r"gym(\.|$)")
+    try:
+        import gym  # type: ignore
+
+        set_level = getattr(gym.logger, "set_level", None)
+        if callable(set_level):
+            err = getattr(gym.logger, "ERROR", 40)
+            set_level(err)
+        elif hasattr(gym.logger, "setLevel"):
+            gym.logger.setLevel(logging.ERROR)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def set_verbose(enabled: bool) -> None:
@@ -178,7 +272,7 @@ def progress(
         unit=unit,
         mininterval=mininterval,
         disable=disable,
-        file=sys.stderr,
+        file=sys.stdout,
         dynamic_ncols=True,
     )
     if iterable is not None:
@@ -305,3 +399,38 @@ def _fmt_score(value: Any) -> str:
     if v == float("-inf"):
         return "-inf"
     return f"{v:.4f}"
+
+
+def amfrs_finished(
+    *,
+    output_dir: str,
+    best_id: Optional[str],
+    best_metrics: Optional[Mapping[str, Any]] = None,
+    coverage: float = 0.0,
+    spent_cost: float = 0.0,
+    n_accepted: int = 0,
+    n_rejected: int = 0,
+    n_scale_drift: int = 0,
+) -> None:
+    """End-of-run review block for the AMFRS search (not Algorithm 1)."""
+    banner("AMFRS finished")
+    status(f"best={best_id or '(none)'}  coverage={coverage:.3f}  cost={spent_cost:.1f}")
+    status(f"accepted={n_accepted}  rejected={n_rejected}  scale_drift_flags={n_scale_drift}")
+    if best_metrics:
+        sr = best_metrics.get("SR", best_metrics.get("sr"))
+        cr = best_metrics.get("CR", best_metrics.get("cr"))
+        tr = best_metrics.get("TR", best_metrics.get("tr"))
+        sd = best_metrics.get("SD", best_metrics.get("sd"))
+        bits = []
+        if sr is not None:
+            bits.append(f"SR={float(sr):.3f}")
+        if cr is not None:
+            bits.append(f"CR={float(cr):.3f}")
+        if tr is not None:
+            bits.append(f"TR={float(tr):.3f}")
+        if sd is not None:
+            bits.append(f"SD={float(sd):.3f}")
+        if bits:
+            status("best metrics: " + "  ".join(bits))
+    status(f"artifacts: {os.path.abspath(output_dir)}")
+    status("files: amfrs_manifest.json  map_elites_archive.json  cost_trace.json")

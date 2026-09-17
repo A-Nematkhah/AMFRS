@@ -8,7 +8,7 @@ soft diagnostics attached to ``candidate.metadata["static_report"]``.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from crowd_nav.reward_search.state import (
@@ -20,6 +20,11 @@ from crowd_nav.reward_search.state import (
 
 ComputeFn = Callable[[RewardState, Dict[str, Any]], float]
 
+# Source of truth: crowd_nav/reward_search/prompts.py :: D5_SEED_FUNCTION
+# (collision_penalty=-20.0, success_reward=10.0). Keep in sync if the seed
+# function's terminal magnitudes ever change.
+SEED_REWARD_RANGE: Tuple[float, float] = (-20.0, 10.0)
+
 
 @dataclass(frozen=True)
 class StaticGateReport:
@@ -29,6 +34,8 @@ class StaticGateReport:
     offending_state_idx: Optional[int] = None
     monotonicity_ok: bool = True
     ignores_humans: bool = False
+    # Observed |range| vs seed terminal magnitudes; >1 means inflation.
+    scale_drift_ratio: float = 1.0
     notes: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -200,6 +207,32 @@ def check_monotonicity_in_danger(
     return True
 
 
+def check_scale_drift(
+    bounded: StaticGateReport,
+    *,
+    seed_range: Tuple[float, float] = SEED_REWARD_RANGE,
+    warn_threshold: float = 5.0,
+) -> float:
+    """
+    Ratio of this candidate's observed |min|/|max| to the seed reward range.
+
+    ``ratio > 1`` means at least one side of the observed range exceeds the
+    corresponding seed terminal magnitude (inflation). Values below 1
+    (smaller-scale rewards) are fine and do not warn. ``warn_threshold`` is
+    unused for the return value; callers soft-flag when ``ratio > warn_threshold``.
+    """
+    del warn_threshold  # documented for callers; ratio itself is the return
+    seed_min_abs = abs(float(seed_range[0]))
+    seed_max_abs = abs(float(seed_range[1]))
+    left = (
+        abs(float(bounded.min_val)) / seed_min_abs if seed_min_abs > 0.0 else 0.0
+    )
+    right = (
+        abs(float(bounded.max_val)) / seed_max_abs if seed_max_abs > 0.0 else 0.0
+    )
+    return float(max(left, right))
+
+
 def check_ignores_humans_and_dmin(
     compute_fn: Any,
     *,
@@ -247,16 +280,20 @@ class StaticGate:
             return bounded
         mono_ok = check_monotonicity_in_danger(reward, seed=self.seed)
         ignores = check_ignores_humans_and_dmin(reward, seed=self.seed)
+        drift_ratio = check_scale_drift(bounded)
         notes: List[str] = []
         if not mono_ok:
             notes.append("monotonicity_violation")
         if ignores:
             notes.append("ignores_humans_and_dmin")
+        if drift_ratio > 5.0:
+            notes.append("scale_drift")
         return StaticGateReport(
             all_finite=True,
             min_val=bounded.min_val,
             max_val=bounded.max_val,
             monotonicity_ok=mono_ok,
             ignores_humans=ignores,
+            scale_drift_ratio=float(drift_ratio),
             notes=tuple(notes),
         )

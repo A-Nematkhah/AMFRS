@@ -4,12 +4,15 @@ A multi-pedestrian trajectory prediction model
 that follows spatial -> temporal encoding manners.
 """
 
+import logging
 import torch
 import torch.nn as nn
 
 # from src.social_transformer.social_transformer import SpatialSocialTransformerEncoder
 from gst_updated.src.gumbel_social_transformer.gumbel_social_transformer import GumbelSocialTransformer
 from gst_updated.src.gumbel_social_transformer.temporal_convolution_net import TemporalConvolutionNet
+
+logger = logging.getLogger(__name__)
 
 
 def offset_error_square_full_partial(x_pred, x_target, loss_mask_ped, loss_mask_pred_seq):
@@ -187,7 +190,7 @@ class st_model(nn.Module):
             raise RuntimeError('The temporal component is not lstm nor faster_lstm.')
         ## others
         self.args = args
-        print("new st model")
+        logger.debug("new st model")
 
     def raw2gaussian(self, prob_raw):
         """

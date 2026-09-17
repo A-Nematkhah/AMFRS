@@ -8,7 +8,6 @@ optional retrieval memory / ensemble critique → robustness on final elites.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import random
 from dataclasses import dataclass, field, replace
@@ -54,8 +53,38 @@ from crowd_nav.reward_search.prompts import D5_SEED_FUNCTION
 from crowd_nav.reward_search.sandbox import RewardValidator
 from crowd_nav.reward_search.sandbox.config import SandboxConfig
 from crowd_nav.reward_search.selection import navigation_scalar_from_dict
+from crowd_nav.reward_search import console
 
-logger = logging.getLogger(__name__)
+
+def _dedupe_candidates_by_id(
+    candidates: List[RewardCandidate],
+) -> List[RewardCandidate]:
+    """
+    Keep one instance per ``candidate_id`` (highest score wins).
+
+    Preserves relative order of first appearance of each winning id.
+    """
+    best: Dict[str, RewardCandidate] = {}
+    for cand in candidates:
+        cid = str(cand.candidate_id)
+        prev = best.get(cid)
+        if prev is None:
+            best[cid] = cand
+            continue
+        prev_s = float(prev.score) if prev.score is not None else float("-inf")
+        cur_s = float(cand.score) if cand.score is not None else float("-inf")
+        if cur_s > prev_s:
+            best[cid] = cand
+    out: List[RewardCandidate] = []
+    seen: set = set()
+    for cand in candidates:
+        cid = str(cand.candidate_id)
+        if cid in seen:
+            continue
+        winner = best[cid]
+        out.append(winner)
+        seen.add(cid)
+    return out
 
 
 @dataclass
@@ -82,7 +111,6 @@ class AMFRSArtifacts:
         cost_path = os.path.join(self.output_dir, "cost_trace.json")
         with open(cost_path, "w", encoding="utf-8") as fh:
             json.dump(self.cost_trace, fh, indent=2)
-        logger.info("Wrote %s", path)
 
 
 class AMFRSPipeline:
@@ -119,7 +147,10 @@ class AMFRSPipeline:
         try:
             return make_llm_client(provider, model=model)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("LLM provider %s failed (%s); falling back to seed", provider, exc)
+            console.warn(
+                f"LLM provider {provider} failed ({exc}); falling back to seed",
+                stage="llm",
+            )
             return make_llm_client("seed", model=model)
 
     def _validate_and_gate(self, code: str, cid: str, origin: str) -> Optional[RewardCandidate]:
@@ -148,6 +179,13 @@ class AMFRSPipeline:
                 valid=False,
                 reward_fn=None,
                 validation_error="static_gate_non_finite",
+            )
+        elif "scale_drift" in (report.notes or ()):
+            console.warn(
+                f"{cid} scale_drift={report.scale_drift_ratio:.1f}x "
+                f"(range [{report.min_val:.1f}, {report.max_val:.1f}] vs seed -20/10) "
+                f"— soft flag, still accepted",
+                stage="gate",
             )
         return cand
 
@@ -238,19 +276,15 @@ class AMFRSPipeline:
                     attempt=attempt,
                 )
                 retry_for_slot += 1
-                logger.info(
-                    "Initial slot %s rejected (%s); have %s/%s valid",
-                    slot,
-                    cand.validation_error if cand else "None",
-                    len(out),
-                    n,
+                console.status(
+                    f"initial slot {slot} rejected ({cand.validation_error if cand else 'None'}); "
+                    f"have {len(out)}/{n} valid",
+                    stage="pop",
                 )
         if len(out) < n:
-            logger.warning(
-                "Could only fill %s/%s valid initial candidates after %s attempts",
-                len(out),
-                n,
-                attempt,
+            console.warn(
+                f"could only fill {len(out)}/{n} valid initial candidates after {attempt} attempts",
+                stage="pop",
             )
         return out
 
@@ -365,12 +399,10 @@ class AMFRSPipeline:
                 children.append(cand)
                 filled = True
         if len(children) < n:
-            logger.warning(
-                "Could only fill %s/%s valid children for gen=%s after %s attempts",
-                len(children),
-                n,
-                gen,
-                attempt,
+            console.warn(
+                f"could only fill {len(children)}/{n} valid children for gen={gen} "
+                f"after {attempt} attempts",
+                stage="illum",
             )
         return children
 
@@ -416,6 +448,71 @@ class AMFRSPipeline:
                 self.archive.try_insert(updated, cell, fitness)
             if self.memory is not None:
                 self.memory.add(cand.code, run_id=cand.candidate_id, outcome_metrics=dict(raw))
+        self._log_rung_review(level_name, survivors)
+
+    def _log_rung_review(self, level_name: str, survivors: List[RewardCandidate]) -> None:
+        """Print the few lines worth reading after each fidelity rung."""
+        ids = [c.candidate_id for c in survivors]
+        console.status(
+            f"{level_name}  survivors={len(survivors)}  "
+            f"ids={ids}  coverage={self.archive.coverage():.3f}  "
+            f"spent={float(self._spent[0]):.0f}",
+            stage="rung",
+        )
+        for cand in survivors:
+            raw = (cand.metadata or {}).get("last_raw_metrics") or {}
+            metric = float(cand.score) if cand.score is not None else float("-inf")
+            bits = [f"{cand.candidate_id}  metric={metric:.4f}"]
+            if str(level_name).startswith("F0"):
+                s1 = raw.get("score1")
+                if s1 is not None:
+                    try:
+                        bits.append(f"score1={float(s1):.4f}")
+                    except (TypeError, ValueError):
+                        pass
+            else:
+                for key in ("SR", "CR", "TR", "SD"):
+                    if key in raw:
+                        try:
+                            bits.append(f"{key}={float(raw[key]):.3f}")
+                        except (TypeError, ValueError):
+                            pass
+            static = (cand.metadata or {}).get("static_report") or {}
+            notes = static.get("notes") or ()
+            if "scale_drift" in notes:
+                try:
+                    bits.append(f"scale_drift={float(static.get('scale_drift_ratio')):.1f}x")
+                except (TypeError, ValueError):
+                    bits.append("scale_drift")
+            hist = (cand.metadata or {}).get("fidelity_history") or []
+            prev_f1 = None
+            this_f2 = None
+            for row in hist:
+                lv = str(row.get("level") or "")
+                try:
+                    m = float(row.get("metric"))
+                except (TypeError, ValueError):
+                    continue
+                if lv.startswith("F1"):
+                    prev_f1 = m
+                if lv.startswith("F2"):
+                    this_f2 = m
+            extra = "  ".join(bits)
+            f2_worse = (
+                str(level_name).startswith("F2")
+                and prev_f1 is not None
+                and this_f2 is not None
+                and this_f2 < prev_f1
+            )
+            if f2_worse:
+                console.warn(
+                    f"{extra}  F2 worse than F1 ({this_f2:.4f} < {prev_f1:.4f})",
+                    stage="rung",
+                )
+            elif "scale_drift" in notes:
+                console.warn(extra, stage="rung")
+            else:
+                console.status(extra, stage="rung")
 
     def _trainer_ctx(self) -> TrainerContext:
         cfg = self.config
@@ -456,12 +553,10 @@ class AMFRSPipeline:
             else:
                 ladder = ladder.truncate_to(max_rung)
         except (KeyError, ValueError) as exc:
-            logger.warning(
-                "Could not build ladder max=%s after=%s (%s); using truncate_to(%s)",
-                max_rung,
-                after_rung,
-                exc,
-                max_rung,
+            console.warn(
+                f"could not build ladder max={max_rung} after={after_rung} ({exc}); "
+                f"using truncate_to({max_rung})",
+                stage="ladder",
             )
             ladder = build_default_ladder(
                 use_stub=use_stub,
@@ -497,16 +592,21 @@ class AMFRSPipeline:
             stage1_dataset_path=cfg.stage1_dataset_path,
             use_stub=use_stub,
         )
-        logger.info("Assets:\n%s", asset_report.format_text())
+        console.banner(
+            f"AMFRS  pop={cfg.population_size} gen={cfg.generations}  "
+            f"illum={cfg.illumination_max_rung} final={cfg.final_rung}  "
+            f"device={cfg.device} llm={cfg.llm_provider} nproc={cfg.num_processes}  "
+            f"stub={use_stub}"
+        )
+        console.status(asset_report.format_text().replace("\n", " | "), stage="assets")
 
         rejected: List[Dict[str, Any]] = []
         accepted = self._generate_initial_population(rejected)
         seed_candidates = list(accepted)
-        logger.info(
-            "Initial population: %s valid (target=%s), %s rejected/replaced",
-            len(accepted),
-            cfg.population_size,
-            len(rejected),
+        console.status(
+            f"initial population: {len(accepted)} valid (target={cfg.population_size}), "
+            f"{len(rejected)} rejected/replaced",
+            stage="pop",
         )
 
         # Initial halving climb (up to illumination_max_rung, then optionally final)
@@ -525,11 +625,10 @@ class AMFRSPipeline:
             else:
                 parents = survivors or accepted
             children = self._propose_children(parents, gen=gen, rejected=rejected)
-            logger.info(
-                "Gen %s children: %s valid (target=%s)",
-                gen,
-                len(children),
-                cfg.population_size,
+            console.status(
+                f"gen {gen + 1}/{cfg.generations}  children={len(children)} "
+                f"(target={cfg.population_size})  coverage={self.archive.coverage():.3f}",
+                stage="illum",
             )
             if not children:
                 coverages.append(self.archive.coverage())
@@ -546,11 +645,15 @@ class AMFRSPipeline:
             )
             coverages.append(self.archive.coverage())
 
-        # Finalists: archive elites or scalar top survivors
+        # Finalists: unique archive elites (same id may occupy several cells).
         if cfg.selection_mode == "map_elites" and self.archive.all_elites():
-            finalists = self.archive.all_elites()
+            finalists = self.archive.unique_elites_by_id()
         else:
-            finalists = list(survivors)
+            finalists = _dedupe_candidates_by_id(list(survivors))
+        console.status(
+            f"finalists={len(finalists)}  ids={[c.candidate_id for c in finalists]}",
+            stage="final",
+        )
 
         # Optional final rung bump: only rungs ABOVE illumination (no F0 restart).
         if finalists and cfg.final_rung and cfg.final_rung != cfg.illumination_max_rung:
@@ -562,16 +665,21 @@ class AMFRSPipeline:
                 use_generation_budget=False,
                 cost_offset=final_start,
             )
-            finalists = final_sched.run(
-                finalists,
-                on_rung_complete=self._on_rung_complete,
-                spent_cost=self._spent,
+            finalists = _dedupe_candidates_by_id(
+                final_sched.run(
+                    finalists,
+                    on_rung_complete=self._on_rung_complete,
+                    spent_cost=self._spent,
+                )
             )
 
-        # Axis 4 robustness on finalists
+        # Axis 4 robustness on unique finalists
         robustness_sweep_degraded = False
         if cfg.run_robustness_sweep and finalists:
             robustified = []
+            # GST + tiny H + multi-proc has known shape mismatches; keep GST
+            # but force a single env process for the short robustness trains.
+            robust_nproc = 1
             for cand in finalists:
                 try:
                     by_pol = run_policy_sweep(
@@ -587,6 +695,7 @@ class AMFRSPipeline:
                         seed=int(cfg.seed),
                         output_root=os.path.join(cfg.output_dir, "robustness"),
                         randomization_regime=str(cfg.randomization_regime),
+                        num_processes=robust_nproc,
                     )
                     if any(
                         isinstance(v, dict) and v.get("stub_fallback")
@@ -595,11 +704,10 @@ class AMFRSPipeline:
                         robustness_sweep_degraded = True
                     robustified.append(attach_robustness_profile(cand, by_pol))
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Robustness sweep failed for %s (%s); "
+                    console.warn(
+                        f"robustness sweep failed for {cand.candidate_id} ({exc}); "
                         "candidate kept without robustness profile",
-                        cand.candidate_id,
-                        exc,
+                        stage="robust",
                     )
                     robustified.append(
                         replace(
@@ -624,6 +732,17 @@ class AMFRSPipeline:
                 ),
             )
             best = ranked[0]
+
+        n_scale_drift = 0
+        seen_ids = set()
+        for cand in list(accepted) + list(finalists or []):
+            cid = str(cand.candidate_id)
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            notes = ((cand.metadata or {}).get("static_report") or {}).get("notes") or ()
+            if "scale_drift" in notes:
+                n_scale_drift += 1
 
         manifest: Dict[str, Any] = {
             "pipeline": "AMFRS",
@@ -660,6 +779,16 @@ class AMFRSPipeline:
             manifest=manifest,
         )
         artifacts.write()
+        console.amfrs_finished(
+            output_dir=cfg.output_dir,
+            best_id=best.candidate_id if best else None,
+            best_metrics=(best.metadata or {}).get("last_raw_metrics") if best else None,
+            coverage=float(self.archive.coverage()),
+            spent_cost=float(self._spent[0]),
+            n_accepted=len(accepted),
+            n_rejected=len(rejected),
+            n_scale_drift=n_scale_drift,
+        )
         if self.memory is not None:
             self.memory.close()
         return artifacts

@@ -30,9 +30,20 @@ def format_candidate_diagnostics(candidate: RewardCandidate) -> str:
     score1_diag = format_score1_diagnostics(md.get("score1_report"))
     if score1_diag:
         parts.append(f"Score1: {score1_diag}")
-    level = md.get("last_fidelity_level")
+    level = md.get("last_fidelity") or md.get("last_fidelity_level")
     if level:
         parts.append(f"last_rung={level}")
+    static = md.get("static_report") or {}
+    if isinstance(static, Mapping):
+        drift = static.get("scale_drift_ratio")
+        notes = static.get("notes") or ()
+        if drift is not None:
+            try:
+                parts.append(f"scale_drift={float(drift):.1f}x")
+            except (TypeError, ValueError):
+                pass
+        if "scale_drift" in notes:
+            parts.append("WARN scale_drift")
     return " — ".join(parts)
 
 

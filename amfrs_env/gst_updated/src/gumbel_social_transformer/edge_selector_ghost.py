@@ -1,9 +1,12 @@
 # import pathhack
+import logging
 import torch
 import torch.nn as nn
 from torch.nn.functional import softmax
 from src.gumbel_social_transformer.mha import VanillaMultiheadAttention
 from src.gumbel_social_transformer.utils import _get_activation_fn, gumbel_softmax
+
+logger = logging.getLogger(__name__)
 
 class EdgeSelector(nn.Module):
     r"""Ghost version."""
@@ -21,7 +24,7 @@ class EdgeSelector(nn.Module):
         self.activation = _get_activation_fn(activation)
         self.d_model = d_model
         self.d_motion = d_motion
-        print("new edge selector")
+        logger.debug("new edge selector")
         
     
     def forward(self, x, A, attn_mask, tau=1., hard=False, device='cuda:0'):
