@@ -50,10 +50,11 @@ def main() -> int:
         "--profile",
         type=str,
         default=None,
-        choices=["short"],
+        choices=["short", "6h", "12h"],
         help=(
-            "Named budget profile. 'short' ≈ 15–30 min real A2C on one GPU "
-            "(no stub, no full PPO, no robustness sweep)."
+            "Named budget profile. 'short' ≈ 15–30 min real A2C (no F3/GST). "
+            "'6h' ≈ 4–8 h with GST, F2 illumination, F3 PPO, robustness. "
+            "'12h' ≈ 10–14 h (larger pop/gen and train budgets)."
         ),
     )
     parser.add_argument(
@@ -119,8 +120,8 @@ def main() -> int:
         print("Use either --fast or --profile, not both.", file=sys.stderr)
         return 2
 
-    # --profile short enables seed LLM by design (local short GPU smoke).
-    allow_seed = bool(args.allow_seed_llm or args.profile == "short")
+    # Named profiles may use --llm seed for local wiring; real 6h/12h runs should pass --llm groq.
+    allow_seed = bool(args.allow_seed_llm or args.profile in {"short", "6h", "12h"})
     if (
         not args.fast
         and str(args.llm).strip().lower() == "seed"
@@ -128,7 +129,7 @@ def main() -> int:
     ):
         print(
             "Refusing non-fast AMFRS with --llm seed. "
-            "Pass a real provider or --allow-seed-llm / --fast / --profile short.",
+            "Pass a real provider or --allow-seed-llm / --fast / --profile short|6h|12h.",
             file=sys.stderr,
         )
         return 2
@@ -161,6 +162,20 @@ def main() -> int:
         cfg.seed = args.seed
     if args.profile == "short":
         cfg.apply_short_gpu_profile()
+        cfg.output_dir = args.output_dir
+        cfg.seed = args.seed
+        cfg.device = args.device
+        cfg.llm_provider = args.llm
+        cfg.allow_seed_llm = True
+    if args.profile == "6h":
+        cfg.apply_6h_gpu_profile()
+        cfg.output_dir = args.output_dir
+        cfg.seed = args.seed
+        cfg.device = args.device
+        cfg.llm_provider = args.llm
+        cfg.allow_seed_llm = True
+    if args.profile == "12h":
+        cfg.apply_12h_gpu_profile()
         cfg.output_dir = args.output_dir
         cfg.seed = args.seed
         cfg.device = args.device

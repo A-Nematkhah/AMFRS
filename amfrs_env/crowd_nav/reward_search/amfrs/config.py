@@ -133,5 +133,75 @@ class AMFRSRunConfig:
         self.llm_provider = "seed"
         self.llm_provider_b = "seed"
 
+    def apply_6h_gpu_profile(self) -> None:
+        """
+        Real trainers aimed at ~4–8 h on one GPU (order-of-magnitude).
+
+        Includes GST (inferred), illumination through F2, final F3 PPO, and
+        multi-policy robustness. Tuned from short-run timings (~5 min for
+        pop=4/gen=1/F2/no-GST); wall-clock varies with GPU and LLM latency.
+        """
+        self.fast = False
+        self.use_stub_trainers = False
+        self.population_size = 8
+        self.generations = 3
+        self.score1_mode = "dataset"
+        # F1 / F2 / F3 budgets (env steps)
+        self.stage2_train_steps_short = 12_500
+        self.stage2_train_steps = 40_000
+        self.stage2_eval_episodes = 40
+        self.stage3_train_steps = 120_000
+        self.stage3_eval_episodes = 80
+        self.max_cost_units_per_generation = 400.0
+        self.illumination_max_rung = "F2_full_a2c"
+        self.final_rung = "F3_full_ppo"
+        self.final_rung_max_cost_units = None
+        self.run_robustness_sweep = True
+        self.predict_method = "inferred"
+        self.human_num = 10
+        self.num_processes = 4
+        self.device = "cuda"
+        self.use_bandit = False
+        self.use_ensemble_critique = False
+        self.allow_seed_llm = True
+        self.llm_provider = "seed"
+        self.llm_provider_b = "seed"
+        self.static_gate_n_states = 64
+
+    def apply_12h_gpu_profile(self) -> None:
+        """
+        Real trainers aimed at ~10–14 h on one GPU (order-of-magnitude).
+
+        Same shape as 6h (GST + F2 illumination + F3 PPO + robustness) with
+        more population/generations and higher train/eval budgets. Prefer
+        ``--llm groq`` (or ollama). Wall-clock varies with GPU and LLM latency.
+        """
+        self.fast = False
+        self.use_stub_trainers = False
+        self.population_size = 12
+        self.generations = 5
+        self.score1_mode = "dataset"
+        # F1 / F2 / F3 budgets (env steps)
+        self.stage2_train_steps_short = 20_000
+        self.stage2_train_steps = 60_000
+        self.stage2_eval_episodes = 50
+        self.stage3_train_steps = 250_000
+        self.stage3_eval_episodes = 100
+        self.max_cost_units_per_generation = 600.0
+        self.illumination_max_rung = "F2_full_a2c"
+        self.final_rung = "F3_full_ppo"
+        self.final_rung_max_cost_units = None
+        self.run_robustness_sweep = True
+        self.predict_method = "inferred"
+        self.human_num = 15
+        self.num_processes = 4
+        self.device = "cuda"
+        self.use_bandit = False
+        self.use_ensemble_critique = False
+        self.allow_seed_llm = True
+        self.llm_provider = "seed"
+        self.llm_provider_b = "seed"
+        self.static_gate_n_states = 64
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
