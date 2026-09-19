@@ -175,9 +175,11 @@ def test_score1_aligned_beats_antialigned():
     ds = _three_scenario_dataset()
     aligned = score1_for_dataset(ds, _AlignedReward())
     anti = score1_for_dataset(ds, _AntiAlignedReward())
-    assert -1.0 <= aligned <= 1.0
-    assert -1.0 <= anti <= 1.0
-    assert aligned > anti
+    assert -1.0 <= aligned.score <= 1.0
+    assert -1.0 <= anti.score <= 1.0
+    assert aligned.score > anti.score
+    assert 0.0 <= aligned.degenerate_fraction <= 1.0
+    assert aligned.n_pairs >= 1
 
 
 def test_score1_raises_when_nothing_scoreable():
@@ -196,8 +198,9 @@ def test_make_score1_fn_and_roundtrip(tmp_path):
     loaded = load_stage1_dataset(str(out))
     assert set(loaded) == set(ds)
     fn = make_score1_fn(loaded)
-    score = fn(_AlignedReward(), candidate_id="c0")
-    assert -1.0 <= score <= 1.0
+    result = fn(_AlignedReward(), candidate_id="c0")
+    assert -1.0 <= float(result) <= 1.0
+    assert "degenerate_fraction" in result.as_dict()
     # State JSON round-trip
     s0 = ds["scenario_000"][0].states[0]
     assert reward_state_from_dict(reward_state_to_dict(s0)).robot.px == s0.robot.px
@@ -253,7 +256,7 @@ def test_collect_stage1_dataset_smoke():
                 assert t.length >= 1
                 assert t.label in ("success", "collision", "timeout")
         score = score1_for_dataset(loaded, _AlignedReward())
-        assert -1.0 <= score <= 1.0
+        assert -1.0 <= score.score <= 1.0
     except OSError as exc:
         if getattr(exc, "errno", None) == 28:
             pytest.skip(f"disk full during collect: {exc}")

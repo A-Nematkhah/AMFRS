@@ -62,9 +62,17 @@ Defaults (AUDIT.md §8): `without_random`, Stage II/III `predict_method=inferred
 ## Tests
 
 ```bash
-pytest crowd_nav/reward_search/tests -m "not slow"   # CI default, 74 tests
+pytest crowd_nav/reward_search/tests -m "not slow"   # CI default
 pytest crowd_nav/reward_search/tests -m slow         # 1 real-env collect test
 ```
+
+## Stage III H-sweep (Table 6)
+
+After Stage III training, the best-ever candidate is re-evaluated at each
+human count in `{5, 10, 15, 20}` (clipped to `H ≤ train human_num`). **Cost:**
+each H value is a **full extra eval pass** of `E3` episodes (default 500) —
+not a cheap metric reuse. Disable with `--no-h-sweep` when iterating locally.
+Paper-scale YAML keeps `human_counts: [5, 10, 15, 20]`.
 
 ## Baseline checkpoints
 

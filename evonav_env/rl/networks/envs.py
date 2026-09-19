@@ -112,7 +112,9 @@ def make_vec_envs(env_name,
     test = False if len(envs) > 1 else True
 
     if len(envs) > 1:
-        # fork is unavailable / unsafe on Windows; spawn matches rl/vec_env/envs.py.
+        # fork is unavailable / unsafe on Windows; use spawn (same as historical
+        # OpenAI Baselines ShmemVecEnv practice). Active env factory is this module
+        # (rl/networks/envs.py); there is no rl/vec_env/envs.py in this tree.
         context = "spawn" if os.name == "nt" else "fork"
         envs = ShmemVecEnv(envs, context=context)
     else:

@@ -27,8 +27,10 @@ def test_smoke_score_fn_finite():
         pot_factor=2.0,
     )
     score = fn(legacy, candidate_id="x")
-    assert score == score  # not NaN
-    assert score > float("-inf")
+    value = float(score)
+    assert value == value  # not NaN
+    assert value > float("-inf")
+    assert 0.0 <= float(score.degenerate_fraction) <= 1.0
 
 
 def test_summarize_episodes_mean_std():

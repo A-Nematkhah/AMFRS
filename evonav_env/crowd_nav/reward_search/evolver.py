@@ -445,11 +445,9 @@ class StageIEvolver:
                 )
                 continue
             try:
-                value = float(
-                    self.score_fn(
-                        cand.as_reward_function(),
-                        candidate_id=cand.candidate_id,
-                    )
+                raw = self.score_fn(
+                    cand.as_reward_function(),
+                    candidate_id=cand.candidate_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 console.fail(
@@ -457,7 +455,25 @@ class StageIEvolver:
                     stage="Stage I",
                 )
                 raise
-            scored.append(replace(cand, score=value))
+            meta = dict(cand.metadata or {})
+            # Score1Result (preferred) or plain float (smoke / test helpers).
+            if hasattr(raw, "score") and hasattr(raw, "degenerate_fraction"):
+                value = float(raw.score)
+                meta["degenerate_fraction"] = float(raw.degenerate_fraction)
+                meta["score1_n_pairs"] = int(getattr(raw, "n_pairs", 0) or 0)
+                meta["score1_n_degenerate"] = int(
+                    getattr(raw, "n_degenerate", 0) or 0
+                )
+                if float(raw.degenerate_fraction) >= 0.5:
+                    console.warn(
+                        f"{cand.candidate_id}: high Score1 degeneracy "
+                        f"({float(raw.degenerate_fraction):.2%} of pairs "
+                        f"had undefined Spearman)",
+                        stage="Stage I",
+                    )
+            else:
+                value = float(raw)
+            scored.append(replace(cand, score=value, metadata=meta))
         scored.sort(
             key=lambda c: float("-inf") if c.score is None else float(c.score),
             reverse=True,
